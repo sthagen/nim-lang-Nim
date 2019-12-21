@@ -50,7 +50,7 @@
 ##   proc loadGame(name: string): Future[Game] {.async.}
 ##
 ## JavaScript compatibility
-## ~~~~~~~~~~~~~~~~~~~~~~~~~
+## ========================
 ##
 ## Nim currently generates `async/await` JavaScript code which is supported in modern
 ## EcmaScript and most modern versions of browsers, Node.js and Electron.
@@ -71,14 +71,17 @@ type
   PromiseJs* {.importcpp: "Promise".} = ref object
   ## A JavaScript Promise
 
+
 proc replaceReturn(node: var NimNode) =
   var z = 0
   for s in node:
     var son = node[z]
+    let jsResolve = ident("jsResolve")
     if son.kind == nnkReturnStmt:
-      node[z] = nnkReturnStmt.newTree(nnkCall.newTree(ident("jsResolve"), son[0]))
+      let value = if son[0].kind != nnkEmpty: nnkCall.newTree(jsResolve, son[0]) else: jsResolve
+      node[z] = nnkReturnStmt.newTree(value)
     elif son.kind == nnkAsgn and son[0].kind == nnkIdent and $son[0] == "result":
-      node[z] = nnkAsgn.newTree(son[0], nnkCall.newTree(ident("jsResolve"), son[1]))
+      node[z] = nnkAsgn.newTree(son[0], nnkCall.newTree(jsResolve, son[1]))
     else:
       replaceReturn(son)
     inc z
@@ -89,11 +92,13 @@ proc isFutureVoid(node: NimNode): bool =
            node[1].kind == nnkIdent and $node[1] == "void"
 
 proc generateJsasync(arg: NimNode): NimNode =
-  assert arg.kind == nnkProcDef
+  if arg.kind notin {nnkProcDef, nnkLambda, nnkMethodDef, nnkDo}:
+      error("Cannot transform this node kind into an async proc." &
+            " proc/method definition or lambda node expected.")
+
   result = arg
   var isVoid = false
-  var jsResolveNode = ident("jsResolve")
-
+  let jsResolve = ident("jsResolve")
   if arg.params[0].kind == nnkEmpty:
     result.params[0] = nnkBracketExpr.newTree(ident("Future"), ident("void"))
     isVoid = true
@@ -106,16 +111,16 @@ proc generateJsasync(arg: NimNode): NimNode =
 
   if len(code) > 0:
     var awaitFunction = quote:
-      proc await[T](f: Future[T]): T {.importcpp: "(await #)".}
+      proc await[T](f: Future[T]): T {.importcpp: "(await #)", used.}
     result.body.add(awaitFunction)
 
     var resolve: NimNode
     if isVoid:
       resolve = quote:
-        var `jsResolveNode` {.importcpp: "undefined".}: Future[void]
+        var `jsResolve` {.importcpp: "undefined".}: Future[void]
     else:
       resolve = quote:
-        proc jsResolve[T](a: T): Future[T] {.importcpp: "#".}
+        proc jsResolve[T](a: T): Future[T] {.importcpp: "#", used.}
     result.body.add(resolve)
   else:
     result.body = newEmptyNode()
@@ -124,18 +129,28 @@ proc generateJsasync(arg: NimNode): NimNode =
 
   if len(code) > 0 and isVoid:
     var voidFix = quote:
-      return `jsResolveNode`
+      return `jsResolve`
     result.body.add(voidFix)
 
-  result.pragma = quote:
+  let asyncPragma = quote:
     {.codegenDecl: "async function $2($3)".}
 
+  result.addPragma(asyncPragma[0])
 
 macro async*(arg: untyped): untyped =
   ## Macro which converts normal procedures into
   ## javascript-compatible async procedures
-  generateJsasync(arg)
+  if arg.kind == nnkStmtList:
+    result = newStmtList()
+    for oneProc in arg:
+      result.add generateJsasync(oneProc)
+  else:
+    result = generateJsasync(arg)
 
 proc newPromise*[T](handler: proc(resolve: proc(response: T))): Future[T] {.importcpp: "(new Promise(#))".}
+  ## A helper for wrapping callback-based functions
+  ## into promises and async procedures
+
+proc newPromise*(handler: proc(resolve: proc())): Future[void] {.importcpp: "(new Promise(#))".}
   ## A helper for wrapping callback-based functions
   ## into promises and async procedures

@@ -58,13 +58,11 @@ proc xmlEncode*(s: string): string =
   for i in 0..len(s)-1: addXmlChar(result, s[i])
 
 type
-  CgiError* = object of IOError  ## exception that is raised if a CGI error occurs
-  RequestMethod* = enum  ## the used request method
-    methodNone,          ## no REQUEST_METHOD environment variable
-    methodPost,          ## query uses the POST method
-    methodGet            ## query uses the GET method
-
-{.deprecated: [TRequestMethod: RequestMethod, ECgi: CgiError].}
+  CgiError* = object of IOError ## exception that is raised if a CGI error occurs
+  RequestMethod* = enum ## the used request method
+    methodNone,         ## no REQUEST_METHOD environment variable
+    methodPost,         ## query uses the POST method
+    methodGet           ## query uses the GET method
 
 proc cgiError*(msg: string) {.noreturn.} =
   ## raises an ECgi exception with message `msg`.
@@ -79,6 +77,8 @@ proc getEncodedData(allowedMethods: set[RequestMethod]): string =
     if methodPost notin allowedMethods:
       cgiError("'REQUEST_METHOD' 'POST' is not supported")
     var L = parseInt(getEnv("CONTENT_LENGTH").string)
+    if L == 0:
+      return ""
     result = newString(L)
     if readBuffer(stdin, addr(result[0]), L) != L:
       cgiError("cannot read from stdin")
@@ -97,11 +97,10 @@ iterator decodeData*(data: string): tuple[key, value: TaintedString] =
   var name = ""
   var value = ""
   # decode everything in one pass:
-  while data[i] != '\0':
+  while i < data.len:
     setLen(name, 0) # reuse memory
-    while true:
+    while i < data.len:
       case data[i]
-      of '\0': break
       of '%':
         var x = 0
         handleHexChar(data[i+1], x)
@@ -112,15 +111,16 @@ iterator decodeData*(data: string): tuple[key, value: TaintedString] =
       of '=', '&': break
       else: add(name, data[i])
       inc(i)
-    if data[i] != '=': cgiError("'=' expected")
+    if i >= data.len or data[i] != '=': cgiError("'=' expected")
     inc(i) # skip '='
     setLen(value, 0) # reuse memory
-    while true:
+    while i < data.len:
       case data[i]
       of '%':
         var x = 0
-        handleHexChar(data[i+1], x)
-        handleHexChar(data[i+2], x)
+        if i+2 < data.len:
+          handleHexChar(data[i+1], x)
+          handleHexChar(data[i+2], x)
         inc(i, 2)
         add(value, chr(x))
       of '+': add(value, ' ')
@@ -128,19 +128,18 @@ iterator decodeData*(data: string): tuple[key, value: TaintedString] =
       else: add(value, data[i])
       inc(i)
     yield (name.TaintedString, value.TaintedString)
-    if data[i] == '&': inc(i)
-    elif data[i] == '\0': break
-    else: cgiError("'&' expected")
+    if i < data.len:
+      if data[i] == '&': inc(i)
+      else: cgiError("'&' expected")
 
 iterator decodeData*(allowedMethods: set[RequestMethod] =
        {methodNone, methodPost, methodGet}): tuple[key, value: TaintedString] =
   ## Reads and decodes CGI data and yields the (name, value) pairs the
   ## data consists of. If the client does not use a method listed in the
   ## `allowedMethods` set, an `ECgi` exception is raised.
-  var data = getEncodedData(allowedMethods)
-  if not isNil(data):
-    for key, value in decodeData(data):
-      yield (key, value)
+  let data = getEncodedData(allowedMethods)
+  for key, value in decodeData(data):
+    yield (key, value)
 
 proc readData*(allowedMethods: set[RequestMethod] =
                {methodNone, methodPost, methodGet}): StringTableRef =
@@ -148,6 +147,12 @@ proc readData*(allowedMethods: set[RequestMethod] =
   ## `allowedMethods` set, an `ECgi` exception is raised.
   result = newStringTable()
   for name, value in decodeData(allowedMethods):
+    result[name.string] = value.string
+
+proc readData*(data: string): StringTableRef =
+  ## Read CGI data from a string.
+  result = newStringTable()
+  for name, value in decodeData(data):
     result[name.string] = value.string
 
 proc validateData*(data: StringTableRef, validKeys: varargs[string]) =
@@ -333,11 +338,6 @@ proc writeErrorMessage*(data: string) =
 proc setStackTraceStdout*() =
   ## Makes Nim output stacktraces to stdout, instead of server log.
   errorMessageWriter = writeErrorMessage
-
-proc setStackTraceNewLine*() {.deprecated.} =
-  ## Makes Nim output stacktraces to stdout, instead of server log.
-  ## Depracated alias for setStackTraceStdout.
-  setStackTraceStdout()
 
 proc setCookie*(name, value: string) =
   ## Sets a cookie.

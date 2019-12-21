@@ -1,63 +1,9 @@
 discard """
   exitcode: 0
   disabled: "windows"
-  output: '''
-b failure
-Async traceback:
-  tasync_traceback.nim(97) tasync_traceback
-  asyncmacro.nim(395)      a
-  asyncmacro.nim(34)       a_continue
-    ## Resumes an async procedure
-  tasync_traceback.nim(95) aIter
-  asyncmacro.nim(395)      b
-  asyncmacro.nim(34)       b_continue
-    ## Resumes an async procedure
-  tasync_traceback.nim(92) bIter
-  #[
-    tasync_traceback.nim(97) tasync_traceback
-    asyncmacro.nim(395)      a
-    asyncmacro.nim(43)       a_continue
-      ## Resumes an async procedure
-    asyncfutures.nim(211)    callback=
-    asyncfutures.nim(190)    addCallback
-    asyncfutures.nim(53)     callSoon
-    asyncmacro.nim(34)       a_continue
-      ## Resumes an async procedure
-    asyncmacro.nim(0)        aIter
-    asyncfutures.nim(304)    read
-  ]#
-Exception message: b failure
-Exception type:
-
-bar failure
-Async traceback:
-  tasync_traceback.nim(113) tasync_traceback
-  asyncdispatch.nim(1492)   waitFor
-  asyncdispatch.nim(1496)   poll
-    ## Processes asynchronous completion events
-  asyncdispatch.nim(1262)   runOnce
-  asyncdispatch.nim(183)    processPendingCallbacks
-    ## Executes pending callbacks
-  asyncmacro.nim(34)        bar_continue
-    ## Resumes an async procedure
-  tasync_traceback.nim(108) barIter
-  #[
-    tasync_traceback.nim(113) tasync_traceback
-    asyncdispatch.nim(1492)   waitFor
-    asyncdispatch.nim(1496)   poll
-      ## Processes asynchronous completion events
-    asyncdispatch.nim(1262)   runOnce
-    asyncdispatch.nim(183)    processPendingCallbacks
-      ## Executes pending callbacks
-    asyncmacro.nim(34)        foo_continue
-      ## Resumes an async procedure
-    asyncmacro.nim(0)         fooIter
-    asyncfutures.nim(304)     read
-  ]#
-Exception message: bar failure
-Exception type:'''
+  output: "Matched"
 """
-import asyncdispatch
+import asyncdispatch, strutils
 
 # Tests to ensure our exception trace backs are friendly.
 
@@ -87,6 +33,8 @@ import asyncdispatch
 # tasync_traceback.nim(21) a
 # tasync_traceback.nim(18) b
 
+var result = ""
+
 proc b(): Future[int] {.async.} =
   if true:
     raise newException(OSError, "b failure")
@@ -98,8 +46,8 @@ let aFut = a()
 try:
   discard waitFor aFut
 except Exception as exc:
-  echo exc.msg
-echo()
+  result.add(exc.msg & "\n")
+result.add("\n")
 
 # From #6803
 proc bar(): Future[string] {.async.} =
@@ -110,7 +58,90 @@ proc bar(): Future[string] {.async.} =
 proc foo(): Future[string] {.async.} = return await bar()
 
 try:
-  echo waitFor(foo())
+  result.add(waitFor(foo()) & "\n")
 except Exception as exc:
-  echo exc.msg
-echo()
+  result.add(exc.msg & "\n")
+result.add("\n")
+
+# Use re to parse the result
+import re
+const expected = """
+b failure
+Async traceback:
+  tasync_traceback\.nim\(\d+?\)\s+?tasync_traceback
+  asyncmacro\.nim\(\d+?\)\s+?a
+  asyncmacro\.nim\(\d+?\)\s+?aNimAsyncContinue
+    ## Resumes an async procedure
+  tasync_traceback\.nim\(\d+?\)\s+?aIter
+  asyncmacro\.nim\(\d+?\)\s+?b
+  asyncmacro\.nim\(\d+?\)\s+?bNimAsyncContinue
+    ## Resumes an async procedure
+  tasync_traceback\.nim\(\d+?\)\s+?bIter
+  #\[
+    tasync_traceback\.nim\(\d+?\)\s+?tasync_traceback
+    asyncmacro\.nim\(\d+?\)\s+?a
+    asyncmacro\.nim\(\d+?\)\s+?aNimAsyncContinue
+      ## Resumes an async procedure
+    tasync_traceback\.nim\(\d+?\)\s+?aIter
+    asyncfutures\.nim\(\d+?\)\s+?read
+  \]#
+Exception message: b failure
+Exception type:
+
+bar failure
+Async traceback:
+  tasync_traceback\.nim\(\d+?\)\s+?tasync_traceback
+  asyncdispatch\.nim\(\d+?\)\s+?waitFor
+  asyncdispatch\.nim\(\d+?\)\s+?poll
+    ## Processes asynchronous completion events
+  asyncdispatch\.nim\(\d+?\)\s+?runOnce
+  asyncdispatch\.nim\(\d+?\)\s+?processPendingCallbacks
+    ## Executes pending callbacks
+  asyncmacro\.nim\(\d+?\)\s+?barNimAsyncContinue
+    ## Resumes an async procedure
+  tasync_traceback\.nim\(\d+?\)\s+?barIter
+  #\[
+    tasync_traceback\.nim\(\d+?\)\s+?tasync_traceback
+    asyncdispatch\.nim\(\d+?\)\s+?waitFor
+    asyncdispatch\.nim\(\d+?\)\s+?poll
+      ## Processes asynchronous completion events
+    asyncdispatch\.nim\(\d+?\)\s+?runOnce
+    asyncdispatch\.nim\(\d+?\)\s+?processPendingCallbacks
+      ## Executes pending callbacks
+    asyncmacro\.nim\(\d+?\)\s+?fooNimAsyncContinue
+      ## Resumes an async procedure
+    tasync_traceback\.nim\(\d+?\)\s+?fooIter
+    asyncfutures\.nim\(\d+?\)\s+?read
+  \]#
+Exception message: bar failure
+Exception type:
+"""
+
+let resLines = splitLines(result.strip)
+let expLines = splitLines(expected.strip)
+
+if resLines.len != expLines.len:
+  echo("Not matched! Wrong number of lines!")
+  echo expLines.len
+  echo resLines.len
+  echo("Expected: -----------")
+  echo expected
+  echo("Gotten: -------------")
+  echo result
+  echo("---------------------")
+  quit(QuitFailure)
+
+var ok = true
+for i in 0 ..< resLines.len:
+  if not resLines[i].match(re(expLines[i])):
+    echo "Not matched! Line ", i + 1
+    echo "Expected:"
+    echo expLines[i]
+    echo "Actual:"
+    echo resLines[i]
+    ok = false
+
+if ok:
+  echo("Matched")
+else:
+  quit(QuitFailure)

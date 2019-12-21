@@ -7,6 +7,8 @@
 #    distribution, for details about the copyright.
 #
 
+import system/indexerrors
+
 proc log*(s: cstring) {.importc: "console.log", varargs, nodecl.}
 
 type
@@ -31,8 +33,6 @@ type
 
   JSRef = ref RootObj # Fake type.
 
-{.deprecated: [TSafePoint: SafePoint, TCallFrame: CallFrame].}
-
 var
   framePtr {.importc, nodecl, volatile.}: PCallFrame
   excHandler {.importc, nodecl, volatile.}: int = 0
@@ -48,10 +48,7 @@ proc nimCharToStr(x: char): string {.compilerproc.} =
   result[0] = x
 
 proc isNimException(): bool {.asmNoStackFrame.} =
-  when defined(nimphp):
-    asm "return isset(`lastJSError`['m_type']);"
-  else:
-    asm "return `lastJSError`.m_type;"
+  asm "return `lastJSError` && `lastJSError`.m_type;"
 
 proc getCurrentException*(): ref Exception {.compilerRtl, benign.} =
   if isNimException(): result = cast[ref Exception](lastJSError)
@@ -61,15 +58,14 @@ proc getCurrentExceptionMsg*(): string =
     if isNimException():
       return cast[Exception](lastJSError).msg
     else:
-      when not defined(nimphp):
-        var msg: cstring
-        {.emit: """
-        if (`lastJSError`.message !== undefined) {
-          `msg` = `lastJSError`.message;
-        }
-        """.}
-        if not msg.isNil:
-          return $msg
+      var msg: cstring
+      {.emit: """
+      if (`lastJSError`.message !== undefined) {
+        `msg` = `lastJSError`.message;
+      }
+      """.}
+      if not msg.isNil:
+        return $msg
   return ""
 
 proc auxWriteStackTrace(f: PCallFrame): string =
@@ -114,7 +110,7 @@ proc getStackTrace*(e: ref Exception): string = e.trace
 proc unhandledException(e: ref Exception) {.
     compilerproc, asmNoStackFrame.} =
   var buf = ""
-  if e.msg != nil and e.msg[0] != '\0':
+  if e.msg.len != 0:
     add(buf, "Error: unhandled exception: ")
     add(buf, e.msg)
   else:
@@ -124,7 +120,7 @@ proc unhandledException(e: ref Exception) {.
   add(buf, "]\n")
   when NimStackTrace:
     add(buf, rawWriteStackTrace())
-  let cbuf : cstring = buf
+  let cbuf = cstring(buf)
   framePtr = nil
   {.emit: """
   if (typeof(Error) !== "undefined") {
@@ -140,12 +136,9 @@ proc raiseException(e: ref Exception, ename: cstring) {.
   e.name = ename
   if excHandler == 0:
     unhandledException(e)
-  when defined(nimphp):
-    asm """throw new Exception($`e`["message"]);"""
-  else:
-    when NimStackTrace:
-      e.trace = rawWriteStackTrace()
-    asm "throw `e`;"
+  when NimStackTrace:
+    e.trace = rawWriteStackTrace()
+  asm "throw `e`;"
 
 proc reraiseException() {.compilerproc, asmNoStackFrame.} =
   if lastJSError == nil:
@@ -166,64 +159,40 @@ proc raiseDivByZero {.exportc: "raiseDivByZero", noreturn, compilerProc.} =
 proc raiseRangeError() {.compilerproc, noreturn.} =
   raise newException(RangeError, "value out of range")
 
-proc raiseIndexError() {.compilerproc, noreturn.} =
-  raise newException(IndexError, "index out of bounds")
+proc raiseIndexError(i, a, b: int) {.compilerproc, noreturn.} =
+  raise newException(IndexError, formatErrorIndexBound(int(i), int(a), int(b)))
 
 proc raiseFieldError(f: string) {.compilerproc, noreturn.} =
-  raise newException(FieldError, f & " is not accessible")
+  raise newException(FieldError, f)
 
 proc setConstr() {.varargs, asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    asm """
-      $args = func_get_args();
-      $result = array();
-      foreach ($args as $x) {
-        if (is_array($x)) {
-          for ($j = $x[0]; $j <= $x[1]; $j++) {
-            $result[$j] = true;
-          }
-        } else {
-          $result[$x] = true;
+  asm """
+    var result = {};
+    for (var i = 0; i < arguments.length; ++i) {
+      var x = arguments[i];
+      if (typeof(x) == "object") {
+        for (var j = x[0]; j <= x[1]; ++j) {
+          result[j] = true;
         }
+      } else {
+        result[x] = true;
       }
-      return $result;
-    """
-  else:
-    asm """
-      var result = {};
-      for (var i = 0; i < arguments.length; ++i) {
-        var x = arguments[i];
-        if (typeof(x) == "object") {
-          for (var j = x[0]; j <= x[1]; ++j) {
-            result[j] = true;
-          }
-        } else {
-          result[x] = true;
-        }
-      }
-      return result;
-    """
+    }
+    return result;
+  """
 
 proc makeNimstrLit(c: cstring): string {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    {.emit: """return `c`;""".}
-  else:
-    {.emit: """
-    var ln = `c`.length;
-    var result = new Array(ln + 1);
-    var i = 0;
-    for (; i < ln; ++i) {
-      result[i] = `c`.charCodeAt(i);
-    }
-    result[i] = 0; // terminating zero
-    return result;
-    """.}
+  {.emit: """
+  var ln = `c`.length;
+  var result = new Array(ln);
+  for (var i = 0; i < ln; ++i) {
+    result[i] = `c`.charCodeAt(i);
+  }
+  return result;
+  """.}
 
 proc cstrToNimstr(c: cstring): string {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    {.emit: """return `c`;""".}
-  else:
-    {.emit: """
+  {.emit: """
   var ln = `c`.length;
   var result = new Array(ln);
   var r = 0;
@@ -256,187 +225,123 @@ proc cstrToNimstr(c: cstring): string {.asmNoStackFrame, compilerproc.} =
     }
     ++r;
   }
-  result[r] = 0; // terminating zero
   return result;
   """.}
 
-proc toJSStr(s: string): cstring {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    {.emit: """return `s`;""".}
-  else:
-    asm """
-    var len = `s`.length-1;
-    var asciiPart = new Array(len);
-    var fcc = String.fromCharCode;
-    var nonAsciiPart = null;
-    var nonAsciiOffset = 0;
-    for (var i = 0; i < len; ++i) {
-      if (nonAsciiPart !== null) {
-        var offset = (i - nonAsciiOffset) * 2;
-        var code = `s`[i].toString(16);
-        if (code.length == 1) {
-          code = "0"+code;
-        }
-        nonAsciiPart[offset] = "%";
-        nonAsciiPart[offset + 1] = code;
-      }
-      else if (`s`[i] < 128)
-        asciiPart[i] = fcc(`s`[i]);
-      else {
-        asciiPart.length = i;
-        nonAsciiOffset = i;
-        nonAsciiPart = new Array((len - i) * 2);
-        --i;
-      }
-    }
-    asciiPart = asciiPart.join("");
-    return (nonAsciiPart === null) ?
-        asciiPart : asciiPart + decodeURIComponent(nonAsciiPart.join(""));
-  """
+proc toJSStr(s: string): cstring {.compilerproc.} =
+  proc fromCharCode(c: char): cstring {.importc: "String.fromCharCode".}
+  proc join(x: openArray[cstring]; d = cstring""): cstring {.
+    importcpp: "#.join(@)".}
+  proc decodeURIComponent(x: cstring): cstring {.
+    importc: "decodeURIComponent".}
+
+  proc toHexString(c: char; d = 16): cstring {.importcpp: "#.toString(@)".}
+
+  proc log(x: cstring) {.importc: "console.log".}
+
+  var res = newSeq[cstring](s.len)
+  var i = 0
+  var j = 0
+  while i < s.len:
+    var c = s[i]
+    if c < '\128':
+      res[j] = fromCharCode(c)
+      inc i
+    else:
+      var helper = newSeq[cstring]()
+      while true:
+        let code = toHexString(c)
+        if code.len == 1:
+          helper.add cstring"%0"
+        else:
+          helper.add cstring"%"
+        helper.add code
+        inc i
+        if i >= s.len or s[i] < '\128': break
+        c = s[i]
+      try:
+        res[j] = decodeURIComponent join(helper)
+      except:
+        res[j] = join(helper)
+    inc j
+  setLen(res, j)
+  result = join(res)
 
 proc mnewString(len: int): string {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    asm """
-      return str_repeat(chr(0),`len`);
-    """
-  else:
-    asm """
-      var result = new Array(`len`+1);
-      result[0] = 0;
-      result[`len`] = 0;
-      return result;
-    """
-
-when defined(nimphp):
-  proc nimAt(x: string; i: int): string {.asmNoStackFrame, compilerproc.} =
-    asm """
-      return `x`[`i`];
-    """
-
-when defined(nimphp):
-  proc nimSubstr(s: string; a, b: int): string {.
-      asmNoStackFrame, compilerproc.} =
-    asm """return substr(`s`,`a`,`b`-`a`+1);"""
+  asm """
+    return new Array(`len`);
+  """
 
 proc SetCard(a: int): int {.compilerproc, asmNoStackFrame.} =
   # argument type is a fake
-  when defined(nimphp):
-    asm """
-      return count(`a`);
-    """
-  else:
-    asm """
-      var result = 0;
-      for (var elem in `a`) { ++result; }
-      return result;
-    """
+  asm """
+    var result = 0;
+    for (var elem in `a`) { ++result; }
+    return result;
+  """
 
 proc SetEq(a, b: int): bool {.compilerproc, asmNoStackFrame.} =
-  when defined(nimphp):
-    asm """
-      foreach (`a` as $elem=>$_) { if (!isset(`b`[$elem])) return false; }
-      foreach (`b` as $elem=>$_) { if (!isset(`a`[$elem])) return false; }
-      return true;
-    """
-  else:
-    asm """
-      for (var elem in `a`) { if (!`b`[elem]) return false; }
-      for (var elem in `b`) { if (!`a`[elem]) return false; }
-      return true;
-    """
+  asm """
+    for (var elem in `a`) { if (!`b`[elem]) return false; }
+    for (var elem in `b`) { if (!`a`[elem]) return false; }
+    return true;
+  """
 
 proc SetLe(a, b: int): bool {.compilerproc, asmNoStackFrame.} =
-  when defined(nimphp):
-    asm """
-      foreach (`a` as $elem=>$_) { if (!isset(`b`[$elem])) return false; }
-      return true;
-    """
-  else:
-    asm """
-      for (var elem in `a`) { if (!`b`[elem]) return false; }
-      return true;
-    """
+  asm """
+    for (var elem in `a`) { if (!`b`[elem]) return false; }
+    return true;
+  """
 
 proc SetLt(a, b: int): bool {.compilerproc.} =
   result = SetLe(a, b) and not SetEq(a, b)
 
 proc SetMul(a, b: int): int {.compilerproc, asmNoStackFrame.} =
-  when defined(nimphp):
-    asm """
-      var $result = array();
-      foreach (`a` as $elem=>$_) {
-        if (isset(`b`[$elem])) { $result[$elem] = true; }
-      }
-      return $result;
-    """
-  else:
-    asm """
-      var result = {};
-      for (var elem in `a`) {
-        if (`b`[elem]) { result[elem] = true; }
-      }
-      return result;
-    """
+  asm """
+    var result = {};
+    for (var elem in `a`) {
+      if (`b`[elem]) { result[elem] = true; }
+    }
+    return result;
+  """
 
 proc SetPlus(a, b: int): int {.compilerproc, asmNoStackFrame.} =
-  when defined(nimphp):
-    asm """
-      var $result = array();
-      foreach (`a` as $elem=>$_) { $result[$elem] = true; }
-      foreach (`b` as $elem=>$_) { $result[$elem] = true; }
-      return $result;
-    """
-  else:
-    asm """
-      var result = {};
-      for (var elem in `a`) { result[elem] = true; }
-      for (var elem in `b`) { result[elem] = true; }
-      return result;
-    """
+  asm """
+    var result = {};
+    for (var elem in `a`) { result[elem] = true; }
+    for (var elem in `b`) { result[elem] = true; }
+    return result;
+  """
 
 proc SetMinus(a, b: int): int {.compilerproc, asmNoStackFrame.} =
-  when defined(nimphp):
-    asm """
-      $result = array();
-      foreach (`a` as $elem=>$_) {
-        if (!isset(`b`[$elem])) { $result[$elem] = true; }
-      }
-      return $result;
-    """
-  else:
-    asm """
-      var result = {};
-      for (var elem in `a`) {
-        if (!`b`[elem]) { result[elem] = true; }
-      }
-      return result;
-    """
+  asm """
+    var result = {};
+    for (var elem in `a`) {
+      if (!`b`[elem]) { result[elem] = true; }
+    }
+    return result;
+  """
 
 proc cmpStrings(a, b: string): int {.asmNoStackFrame, compilerProc.} =
   asm """
     if (`a` == `b`) return 0;
     if (!`a`) return -1;
     if (!`b`) return 1;
-    for (var i = 0; i < `a`.length-1; ++i) {
+    for (var i = 0; i < `a`.length && i < `b`.length; i++) {
       var result = `a`[i] - `b`[i];
       if (result != 0) return result;
     }
-    return 0;
+    return `a`.length - `b`.length;
   """
 
 proc cmp(x, y: string): int =
-  when defined(nimphp):
-    asm """
-      if(`x` < `y`) `result` = -1;
-      elseif (`x` > `y`) `result` = 1;
-      else `result` = 0;
-    """
-  else:
-    return cmpStrings(x, y)
+  return cmpStrings(x, y)
 
 proc eqStrings(a, b: string): bool {.asmNoStackFrame, compilerProc.} =
   asm """
     if (`a` == `b`) return true;
+    if (`a` === null && `b`.length == 0) return true;
+    if (`b` === null && `a`.length == 0) return true;
     if ((!`a`) || (!`b`)) return false;
     var alen = `a`.length;
     if (alen != `b`.length) return false;
@@ -467,7 +372,7 @@ elif not defined(nimOldEcho):
       console.log(buf);
     """
 
-elif not defined(nimphp):
+else:
   proc ewriteln(x: cstring) =
     var node : JSRef
     {.emit: "`node` = document.getElementsByTagName('body')[0];".}
@@ -493,127 +398,77 @@ elif not defined(nimphp):
 
 # Arithmetic:
 proc addInt(a, b: int): int {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    asm """
-      return `a` + `b`;
-    """
-  else:
-    asm """
-      var result = `a` + `b`;
-      if (result > 2147483647 || result < -2147483648) `raiseOverflow`();
-      return result;
-    """
+  asm """
+    var result = `a` + `b`;
+    if (result > 2147483647 || result < -2147483648) `raiseOverflow`();
+    return result;
+  """
 
 proc subInt(a, b: int): int {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    asm """
-      return `a` - `b`;
-    """
-  else:
-    asm """
-      var result = `a` - `b`;
-      if (result > 2147483647 || result < -2147483648) `raiseOverflow`();
-      return result;
-    """
+  asm """
+    var result = `a` - `b`;
+    if (result > 2147483647 || result < -2147483648) `raiseOverflow`();
+    return result;
+  """
 
 proc mulInt(a, b: int): int {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    asm """
-      return `a` * `b`;
-    """
-  else:
-    asm """
-      var result = `a` * `b`;
-      if (result > 2147483647 || result < -2147483648) `raiseOverflow`();
-      return result;
-    """
+  asm """
+    var result = `a` * `b`;
+    if (result > 2147483647 || result < -2147483648) `raiseOverflow`();
+    return result;
+  """
 
 proc divInt(a, b: int): int {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    asm """
-      return trunc(`a` / `b`);
-    """
-  else:
-    asm """
-      if (`b` == 0) `raiseDivByZero`();
-      if (`b` == -1 && `a` == 2147483647) `raiseOverflow`();
-      return Math.trunc(`a` / `b`);
-    """
+  asm """
+    if (`b` == 0) `raiseDivByZero`();
+    if (`b` == -1 && `a` == 2147483647) `raiseOverflow`();
+    return Math.trunc(`a` / `b`);
+  """
 
 proc modInt(a, b: int): int {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    asm """
-      return `a` % `b`;
-    """
-  else:
-    asm """
-      if (`b` == 0) `raiseDivByZero`();
-      if (`b` == -1 && `a` == 2147483647) `raiseOverflow`();
-      return Math.trunc(`a` % `b`);
-    """
+  asm """
+    if (`b` == 0) `raiseDivByZero`();
+    if (`b` == -1 && `a` == 2147483647) `raiseOverflow`();
+    return Math.trunc(`a` % `b`);
+  """
 
 proc addInt64(a, b: int): int {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    asm """
-      return `a` + `b`;
-    """
-  else:
-    asm """
-      var result = `a` + `b`;
-      if (result > 9223372036854775807
-      || result < -9223372036854775808) `raiseOverflow`();
-      return result;
-    """
+  asm """
+    var result = `a` + `b`;
+    if (result > 9223372036854775807
+    || result < -9223372036854775808) `raiseOverflow`();
+    return result;
+  """
 
 proc subInt64(a, b: int): int {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    asm """
-      return `a` - `b`;
-    """
-  else:
-    asm """
-      var result = `a` - `b`;
-      if (result > 9223372036854775807
-      || result < -9223372036854775808) `raiseOverflow`();
-      return result;
-    """
+  asm """
+    var result = `a` - `b`;
+    if (result > 9223372036854775807
+    || result < -9223372036854775808) `raiseOverflow`();
+    return result;
+  """
 
 proc mulInt64(a, b: int): int {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    asm """
-      return `a` * `b`;
-    """
-  else:
-    asm """
-      var result = `a` * `b`;
-      if (result > 9223372036854775807
-      || result < -9223372036854775808) `raiseOverflow`();
-      return result;
-    """
+  asm """
+    var result = `a` * `b`;
+    if (result > 9223372036854775807
+    || result < -9223372036854775808) `raiseOverflow`();
+    return result;
+  """
 
 proc divInt64(a, b: int): int {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    asm """
-      return trunc(`a` / `b`);
-    """
-  else:
-    asm """
-      if (`b` == 0) `raiseDivByZero`();
-      if (`b` == -1 && `a` == 9223372036854775807) `raiseOverflow`();
-      return Math.trunc(`a` / `b`);
-    """
+  asm """
+    if (`b` == 0) `raiseDivByZero`();
+    if (`b` == -1 && `a` == 9223372036854775807) `raiseOverflow`();
+    return Math.trunc(`a` / `b`);
+  """
 
 proc modInt64(a, b: int): int {.asmNoStackFrame, compilerproc.} =
-  when defined(nimphp):
-    asm """
-      return `a` % `b`;
-    """
-  else:
-    asm """
-      if (`b` == 0) `raiseDivByZero`();
-      if (`b` == -1 && `a` == 9223372036854775807) `raiseOverflow`();
-      return Math.trunc(`a` % `b`);
-    """
+  asm """
+    if (`b` == 0) `raiseDivByZero`();
+    if (`b` == -1 && `a` == 9223372036854775807) `raiseOverflow`();
+    return Math.trunc(`a` % `b`);
+  """
 
 proc negInt(a: int): int {.compilerproc.} =
   result = a*(-1)
@@ -627,26 +482,27 @@ proc absInt(a: int): int {.compilerproc.} =
 proc absInt64(a: int64): int64 {.compilerproc.} =
   result = if a < 0: a*(-1) else: a
 
-proc ze*(a: int): int {.compilerproc.} =
-  result = a
+when not defined(nimNoZeroExtendMagic):
+  proc ze*(a: int): int {.compilerproc.} =
+    result = a
 
-proc ze64*(a: int64): int64 {.compilerproc.} =
-  result = a
+  proc ze64*(a: int64): int64 {.compilerproc.} =
+    result = a
 
-proc toU8*(a: int): int8 {.asmNoStackFrame, compilerproc.} =
-  asm """
-    return `a`;
-  """
+  proc toU8*(a: int): int8 {.asmNoStackFrame, compilerproc.} =
+    asm """
+      return `a`;
+    """
 
-proc toU16*(a: int): int16 {.asmNoStackFrame, compilerproc.} =
-  asm """
-    return `a`;
-  """
+  proc toU16*(a: int): int16 {.asmNoStackFrame, compilerproc.} =
+    asm """
+      return `a`;
+    """
 
-proc toU32*(a: int64): int32 {.asmNoStackFrame, compilerproc.} =
-  asm """
-    return `a`;
-  """
+  proc toU32*(a: int64): int32 {.asmNoStackFrame, compilerproc.} =
+    asm """
+      return `a`;
+    """
 
 proc nimMin(a, b: int): int {.compilerproc.} = return if a <= b: a else: b
 proc nimMax(a, b: int): int {.compilerproc.} = return if a >= b: a else: b
@@ -655,7 +511,6 @@ proc chckNilDisp(p: pointer) {.compilerproc.} =
   if p == nil:
     sysFatal(NilAccessError, "cannot dispatch; dispatcher is nil")
 
-type NimString = string # hack for hti.nim
 include "system/hti"
 
 proc isFatPointer(ti: PNimType): bool =
@@ -674,8 +529,11 @@ proc nimCopyAux(dest, src: JSRef, n: ptr TNimNode) {.compilerproc.} =
       `dest`[`n`.offset] = nimCopy(`dest`[`n`.offset], `src`[`n`.offset], `n`.typ);
     """
   of nkList:
-    for i in 0..n.len-1:
-      nimCopyAux(dest, src, n.sons[i])
+    asm """
+    for (var i = 0; i < `n`.sons.length; i++) {
+      nimCopyAux(`dest`, `src`, `n`.sons[i]);
+    }
+    """
   of nkCase:
     asm """
       `dest`[`n`.offset] = nimCopy(`dest`[`n`.offset], `src`[`n`.offset], `n`.typ);
@@ -767,28 +625,18 @@ proc genericReset(x: JSRef, ti: PNimType): JSRef {.compilerproc.} =
   else:
     discard
 
-when defined(nimphp):
-  proc arrayConstr(len: int, value: string, typ: string): JSRef {.
-                  asmNoStackFrame, compilerproc.} =
-    # types are fake
-    asm """
-      $result = array();
-      for ($i = 0; $i < `len`; $i++) $result[] = `value`;
-      return $result;
-    """
-else:
-  proc arrayConstr(len: int, value: JSRef, typ: PNimType): JSRef {.
-                  asmNoStackFrame, compilerproc.} =
+proc arrayConstr(len: int, value: JSRef, typ: PNimType): JSRef {.
+                asmNoStackFrame, compilerproc.} =
   # types are fake
-    asm """
-      var result = new Array(`len`);
-      for (var i = 0; i < `len`; ++i) result[i] = nimCopy(null, `value`, `typ`);
-      return result;
-    """
+  asm """
+    var result = new Array(`len`);
+    for (var i = 0; i < `len`; ++i) result[i] = nimCopy(null, `value`, `typ`);
+    return result;
+  """
 
 proc chckIndx(i, a, b: int): int {.compilerproc.} =
   if i >= a and i <= b: return i
-  else: raiseIndexError()
+  else: raiseIndexError(i, a, b)
 
 proc chckRange(i, a, b: int): int {.compilerproc.} =
   if i >= a and i <= b: return i
@@ -813,9 +661,7 @@ proc isObj(obj, subclass: PNimType): bool {.compilerproc.} =
   return true
 
 proc addChar(x: string, c: char) {.compilerproc, asmNoStackFrame.} =
-  asm """
-    `x`[`x`.length-1] = `c`; `x`.push(0);
-  """
+  asm "`x`.push(`c`);"
 
 {.pop.}
 
@@ -909,3 +755,16 @@ when defined(nodejs):
 else:
   # Deprecated. Use `alert` defined in dom.nim
   proc alert*(s: cstring) {.importc, nodecl, deprecated.}
+
+# Workaround for IE, IE up to version 11 lacks 'Math.trunc'. We produce
+# 'Math.trunc' for Nim's ``div`` and ``mod`` operators:
+const jsMathTrunc = """
+if (!Math.trunc) {
+  Math.trunc = function(v) {
+    v = +v;
+    if (!isFinite(v)) return v;
+    return (v - v % 1) || (v < 0 ? -0 : v === 0 ? v : 0);
+  };
+}
+"""
+when not defined(nodejs): {.emit: jsMathTrunc .}

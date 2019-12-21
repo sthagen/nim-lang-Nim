@@ -104,36 +104,13 @@ type
     pDumpHeapFile: pointer # File that is used for GC_dumpHeap
     when hasThreadSupport:
       toDispose: SharedList[pointer]
+    gcThreadId: int
 
 var
   gch {.rtlThreadVar.}: GcHeap
 
 when not defined(useNimRtl):
   instantiateForRegion(gch.region)
-
-template acquire(gch: GcHeap) =
-  when hasThreadSupport and hasSharedHeap:
-    acquireSys(HeapLock)
-
-template release(gch: GcHeap) =
-  when hasThreadSupport and hasSharedHeap:
-    releaseSys(HeapLock)
-
-proc initGC() =
-  when not defined(useNimRtl):
-    gch.red = (1-gch.black)
-    gch.cycleThreshold = InitialCycleThreshold
-    gch.stat.stackScans = 0
-    gch.stat.completedCollections = 0
-    gch.stat.maxThreshold = 0
-    gch.stat.maxStackSize = 0
-    gch.stat.maxStackCells = 0
-    gch.stat.cycleTableSize = 0
-    # init the rt
-    init(gch.additionalRoots)
-    init(gch.greyStack)
-    when hasThreadSupport:
-      init(gch.toDispose)
 
 # Which color to use for new objects is tricky: When we're marking,
 # they have to be *white* so that everything is marked that is only
@@ -158,9 +135,6 @@ proc cellToUsr(cell: PCell): pointer {.inline.} =
 proc usrToCell(usr: pointer): PCell {.inline.} =
   # convert pointer to userdata to object (=pointer to refcount)
   result = cast[PCell](cast[ByteAddress](usr)-%ByteAddress(sizeof(Cell)))
-
-proc canBeCycleRoot(c: PCell): bool {.inline.} =
-  result = ntfAcyclic notin c.typ.flags
 
 proc extGetCellType(c: pointer): PNimType {.compilerproc.} =
   # used for code generation concerning debugging
@@ -193,7 +167,10 @@ proc writeCell(file: File; msg: cstring, c: PCell) =
     let id = c.id
   else:
     let id = c
-  when leakDetector:
+  when defined(nimTypeNames):
+    c_fprintf(file, "%s %p %d escaped=%ld color=%c of type %s\n",
+              msg, id, kind, didEscape(c), col, c.typ.name)
+  elif leakDetector:
     c_fprintf(file, "%s %p %d escaped=%ld color=%c from %s(%ld)\n",
               msg, id, kind, didEscape(c), col, c.filename, c.line)
   else:
@@ -216,16 +193,12 @@ proc doOperation(p: pointer, op: WalkOp) {.benign.}
 proc forAllChildrenAux(dest: pointer, mt: PNimType, op: WalkOp) {.benign.}
 # we need the prototype here for debugging purposes
 
-proc rtlAddCycleRoot(c: PCell) {.rtl, inl.} =
-  # we MUST access gch as a global here, because this crosses DLL boundaries!
-  discard
-
-proc nimGCref(p: pointer) {.compilerProc.} =
+proc nimGCref(p: pointer) {.compilerproc.} =
   let cell = usrToCell(p)
   markAsEscaped(cell)
   add(gch.additionalRoots, cell)
 
-proc nimGCunref(p: pointer) {.compilerProc.} =
+proc nimGCunref(p: pointer) {.compilerproc.} =
   let cell = usrToCell(p)
   var L = gch.additionalRoots.len-1
   var i = L
@@ -237,10 +210,10 @@ proc nimGCunref(p: pointer) {.compilerProc.} =
       break
     dec(i)
 
-proc nimGCunrefNoCycle(p: pointer) {.compilerProc, inline.} =
+proc nimGCunrefNoCycle(p: pointer) {.compilerproc, inline.} =
   discard "can we do some freeing here?"
 
-proc nimGCunrefRC1(p: pointer) {.compilerProc, inline.} =
+proc nimGCunrefRC1(p: pointer) {.compilerproc, inline.} =
   discard "can we do some freeing here?"
 
 template markGrey(x: PCell) =
@@ -252,13 +225,8 @@ template markGrey(x: PCell) =
     x.setColor(rcGrey)
     add(gch.greyStack, x)
 
-proc GC_addCycleRoot*[T](p: ref T) {.inline.} =
-  ## adds 'p' to the cycle candidate set for the cycle collector. It is
-  ## necessary if you used the 'acyclic' pragma for optimization
-  ## purposes and need to break cycles manually.
-  discard
-
-template asgnRefImpl =
+proc asgnRef(dest: PPointer, src: pointer) {.compilerproc, inline.} =
+  # the code generator calls this proc!
   gcAssert(not isOnStack(dest), "asgnRef")
   # BUGFIX: first incRef then decRef!
   if src != nil:
@@ -267,36 +235,18 @@ template asgnRefImpl =
     markGrey(s)
   dest[] = src
 
-proc asgnRef(dest: PPointer, src: pointer) {.compilerProc, inline.} =
-  # the code generator calls this proc!
-  asgnRefImpl()
+proc asgnRefNoCycle(dest: PPointer, src: pointer) {.compilerproc, inline,
+  deprecated: "old compiler compat".} = asgnRef(dest, src)
 
-proc asgnRefNoCycle(dest: PPointer, src: pointer) {.compilerProc, inline.} =
-  asgnRefImpl()
-
-proc unsureAsgnRef(dest: PPointer, src: pointer) {.compilerProc.} =
+proc unsureAsgnRef(dest: PPointer, src: pointer) {.compilerproc.} =
   # unsureAsgnRef marks 'src' as grey only if dest is not on the
-  # stack. It is used by the code generator if it cannot decide wether a
+  # stack. It is used by the code generator if it cannot decide whether a
   # reference is in the stack or not (this can happen for var parameters).
   if src != nil:
     let s = usrToCell(src)
     markAsEscaped(s)
     if not isOnStack(dest): markGrey(s)
   dest[] = src
-
-type
-  GlobalMarkerProc = proc () {.nimcall, benign.}
-var
-  globalMarkersLen: int
-  globalMarkers: array[0.. 7_000, GlobalMarkerProc]
-
-proc nimRegisterGlobalMarker(markerProc: GlobalMarkerProc) {.compilerProc.} =
-  if globalMarkersLen <= high(globalMarkers):
-    globalMarkers[globalMarkersLen] = markerProc
-    inc globalMarkersLen
-  else:
-    echo "[GC] cannot register global variable; too many global variables"
-    quit 1
 
 proc forAllSlotsAux(dest: pointer, n: ptr TNimNode, op: WalkOp) {.benign.} =
   var d = cast[ByteAddress](dest)
@@ -315,7 +265,7 @@ proc forAllChildrenAux(dest: pointer, mt: PNimType, op: WalkOp) =
   if dest == nil: return # nothing to do
   if ntfNoRefs notin mt.flags:
     case mt.kind
-    of tyRef, tyOptAsRef, tyString, tySequence: # leaf:
+    of tyRef, tyString, tySequence: # leaf:
       doOperation(cast[PPointer](d)[], op)
     of tyObject, tyTuple:
       forAllSlotsAux(dest, mt.node, op)
@@ -328,13 +278,13 @@ proc forAllChildren(cell: PCell, op: WalkOp) =
   gcAssert(cell != nil, "forAllChildren: 1")
   gcAssert(isAllocatedPtr(gch.region, cell), "forAllChildren: 2")
   gcAssert(cell.typ != nil, "forAllChildren: 3")
-  gcAssert cell.typ.kind in {tyRef, tyOptAsRef, tySequence, tyString}, "forAllChildren: 4"
+  gcAssert cell.typ.kind in {tyRef, tySequence, tyString}, "forAllChildren: 4"
   let marker = cell.typ.marker
   if marker != nil:
     marker(cellToUsr(cell), op.int)
   else:
     case cell.typ.kind
-    of tyRef, tyOptAsRef: # common case
+    of tyRef: # common case
       forAllChildrenAux(cellToUsr(cell), cell.typ.base, op)
     of tySequence:
       var d = cast[ByteAddress](cellToUsr(cell))
@@ -354,10 +304,28 @@ proc gcInvariant*() =
 
 include gc_common
 
+proc initGC() =
+  when not defined(useNimRtl):
+    gch.red = (1-gch.black)
+    gch.cycleThreshold = InitialCycleThreshold
+    gch.stat.stackScans = 0
+    gch.stat.completedCollections = 0
+    gch.stat.maxThreshold = 0
+    gch.stat.maxStackSize = 0
+    gch.stat.maxStackCells = 0
+    gch.stat.cycleTableSize = 0
+    # init the rt
+    init(gch.additionalRoots)
+    init(gch.greyStack)
+    when hasThreadSupport:
+      init(gch.toDispose)
+    gch.gcThreadId = atomicInc(gHeapidGenerator) - 1
+    gcAssert(gch.gcThreadId >= 0, "invalid computed thread ID")
+
 proc rawNewObj(typ: PNimType, size: int, gch: var GcHeap): pointer =
   # generates a new object and sets its reference counter to 0
   sysAssert(allocInv(gch.region), "rawNewObj begin")
-  gcAssert(typ.kind in {tyRef, tyOptAsRef, tyString, tySequence}, "newObj: 1")
+  gcAssert(typ.kind in {tyRef, tyString, tySequence}, "newObj: 1")
   collectCT(gch)
   var res = cast[PCell](rawAlloc(gch.region, size + sizeof(Cell)))
   gcAssert((cast[ByteAddress](res) and (MemAlign-1)) == 0, "newObj: 2")
@@ -404,7 +372,6 @@ proc newSeqRC1(typ: PNimType, len: int): pointer {.compilerRtl.} =
   result = newSeq(typ, len)
 
 proc growObj(old: pointer, newsize: int, gch: var GcHeap): pointer =
-  acquire(gch)
   collectCT(gch)
   var ol = usrToCell(old)
   sysAssert(ol.typ != nil, "growObj: 1")
@@ -428,7 +395,6 @@ proc growObj(old: pointer, newsize: int, gch: var GcHeap): pointer =
   when useCellIds:
     inc gch.idGenerator
     res.id = gch.idGenerator
-  release(gch)
   result = cellToUsr(res)
   when defined(memProfiler): nimProfile(newsize-oldsize)
 
@@ -492,7 +458,9 @@ proc GC_dumpHeap*(file: File) =
         c_fprintf(file, "onstack %p\n", d[i])
       else:
         c_fprintf(file, "onstack_invalid %p\n", d[i])
-  for i in 0 .. globalMarkersLen-1: globalMarkers[i]()
+  if gch.gcThreadId == 0:
+    for i in 0 .. globalMarkersLen-1: globalMarkers[i]()
+  for i in 0 .. threadLocalMarkersLen-1: threadLocalMarkers[i]()
   while true:
     let x = allObjectsAsProc(gch.region, addr spaceIter)
     if spaceIter.state < 0: break
@@ -579,7 +547,9 @@ proc markIncremental(gch: var GcHeap): bool =
   result = true
 
 proc markGlobals(gch: var GcHeap) =
-  for i in 0 .. globalMarkersLen-1: globalMarkers[i]()
+  if gch.gcThreadId == 0:
+    for i in 0 .. globalMarkersLen-1: globalMarkers[i]()
+  for i in 0 .. threadLocalMarkersLen-1: threadLocalMarkers[i]()
 
 proc doOperation(p: pointer, op: WalkOp) =
   if p == nil: return
@@ -599,22 +569,14 @@ proc doOperation(p: pointer, op: WalkOp) =
         markRoot(gch, c)
       else:
         dumpRoot(gch, c)
-    when hasThreadSupport:
-      # could point to a cell which we don't own and don't want to touch/trace
-      if isAllocatedPtr(gch.region, c): handleRoot()
-    else:
-      #gcAssert(isAllocatedPtr(gch.region, c), "doOperation: waMarkGlobal")
-      if not isAllocatedPtr(gch.region, c):
-        c_fprintf(stdout, "[GC] not allocated anymore: MarkGlobal %p\n", c)
-        #GC_dumpHeap()
-        sysAssert(false, "wtf")
-      handleRoot()
+    handleRoot()
     discard allocInv(gch.region)
   of waMarkGrey:
-    if not isAllocatedPtr(gch.region, c):
-      c_fprintf(stdout, "[GC] not allocated anymore: MarkGrey %p\n", c)
-      #GC_dumpHeap()
-      sysAssert(false, "wtf")
+    when false:
+      if not isAllocatedPtr(gch.region, c):
+        c_fprintf(stdout, "[GC] not allocated anymore: MarkGrey %p\n", c)
+        #GC_dumpHeap()
+        sysAssert(false, "wtf")
     if c.color == 1-gch.black:
       c.setColor(rcGrey)
       add(gch.greyStack, c)
@@ -744,16 +706,10 @@ when withRealTime:
 
 when not defined(useNimRtl):
   proc GC_disable() =
-    when hasThreadSupport and hasSharedHeap:
-      discard atomicInc(gch.recGcLock, 1)
-    else:
-      inc(gch.recGcLock)
+    inc(gch.recGcLock)
   proc GC_enable() =
     if gch.recGcLock > 0:
-      when hasThreadSupport and hasSharedHeap:
-        discard atomicDec(gch.recGcLock, 1)
-      else:
-        dec(gch.recGcLock)
+      dec(gch.recGcLock)
 
   proc GC_setStrategy(strategy: GC_Strategy) =
     discard

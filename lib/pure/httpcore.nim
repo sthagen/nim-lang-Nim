@@ -9,6 +9,8 @@
 
 ## Contains functionality shared between the ``httpclient`` and
 ## ``asynchttpserver`` modules.
+##
+## Unstable API.
 
 import tables, strutils, parseutils
 
@@ -26,28 +28,24 @@ type
     HttpVer11,
     HttpVer10
 
-  HttpMethod* = enum  ## the requested HttpMethod
-    HttpHead,         ## Asks for the response identical to the one that would
-                      ## correspond to a GET request, but without the response
-                      ## body.
-    HttpGet,          ## Retrieves the specified resource.
-    HttpPost,         ## Submits data to be processed to the identified
-                      ## resource. The data is included in the body of the
-                      ## request.
-    HttpPut,          ## Uploads a representation of the specified resource.
-    HttpDelete,       ## Deletes the specified resource.
-    HttpTrace,        ## Echoes back the received request, so that a client
-                      ## can see what intermediate servers are adding or
-                      ## changing in the request.
-    HttpOptions,      ## Returns the HTTP methods that the server supports
-                      ## for specified address.
-    HttpConnect,      ## Converts the request connection to a transparent
-                      ## TCP/IP tunnel, usually used for proxies.
-    HttpPatch         ## Applies partial modifications to a resource.
-
-{.deprecated: [httpGet: HttpGet, httpHead: HttpHead, httpPost: HttpPost,
-               httpPut: HttpPut, httpDelete: HttpDelete, httpTrace: HttpTrace,
-               httpOptions: HttpOptions, httpConnect: HttpConnect].}
+  HttpMethod* = enum ## the requested HttpMethod
+    HttpHead,        ## Asks for the response identical to the one that would
+                     ## correspond to a GET request, but without the response
+                     ## body.
+    HttpGet,         ## Retrieves the specified resource.
+    HttpPost,        ## Submits data to be processed to the identified
+                     ## resource. The data is included in the body of the
+                     ## request.
+    HttpPut,         ## Uploads a representation of the specified resource.
+    HttpDelete,      ## Deletes the specified resource.
+    HttpTrace,       ## Echoes back the received request, so that a client
+                     ## can see what intermediate servers are adding or
+                     ## changing in the request.
+    HttpOptions,     ## Returns the HTTP methods that the server supports
+                     ## for specified address.
+    HttpConnect,     ## Converts the request connection to a transparent
+                     ## TCP/IP tunnel, usually used for proxies.
+    HttpPatch        ## Applies partial modifications to a resource.
 
 
 const
@@ -106,7 +104,7 @@ proc newHttpHeaders*(): HttpHeaders =
   result.table = newTable[string, seq[string]]()
 
 proc newHttpHeaders*(keyValuePairs:
-    openarray[tuple[key: string, val: string]]): HttpHeaders =
+    openArray[tuple[key: string, val: string]]): HttpHeaders =
   var pairs: seq[tuple[key: string, val: seq[string]]] = @[]
   for pair in keyValuePairs:
     pairs.add((pair.key.toLowerAscii(), @[pair.val]))
@@ -190,11 +188,11 @@ proc len*(headers: HttpHeaders): int = return headers.table.len
 proc parseList(line: string, list: var seq[string], start: int): int =
   var i = 0
   var current = ""
-  while line[start + i] notin {'\c', '\l', '\0'}:
+  while start+i < line.len and line[start + i] notin {'\c', '\l'}:
     i += line.skipWhitespace(start + i)
     i += line.parseUntil(current, {'\c', '\l', ','}, start + i)
     list.add(current)
-    if line[start + i] == ',':
+    if start+i < line.len and line[start + i] == ',':
       i.inc # Skip ,
     current.setLen(0)
 
