@@ -1457,7 +1457,7 @@ proc genArrToSeq(p: BProc, n: PNode, d: var TLoc) =
       genAssignment(p, elem, arr, {needToCopy})
   else:
     var i: TLoc
-    getTemp(p, getSysType(p.module.g.graph, unknownLineInfo(), tyInt), i)
+    getTemp(p, getSysType(p.module.g.graph, unknownLineInfo, tyInt), i)
     linefmt(p, cpsStmts, "for ($1 = 0; $1 < $2; $1++) {$n",  [i.r, L])
     initLoc(elem, locExpr, lodeTyp elemType(skipTypes(n.typ, abstractInst)), OnHeap)
     elem.r = ropecg(p.module, "$1$3[$2]", [rdLoc(d), rdLoc(i), dataField(p)])
@@ -1847,10 +1847,10 @@ proc genSetOp(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
       initLocExpr(p, e[1], a)
       putIntoDest(p, d, e, ropecg(p.module, "#cardSet($1, $2)", [rdCharLoc(a), size]))
     of mLtSet, mLeSet:
-      getTemp(p, getSysType(p.module.g.graph, unknownLineInfo(), tyInt), i) # our counter
+      getTemp(p, getSysType(p.module.g.graph, unknownLineInfo, tyInt), i) # our counter
       initLocExpr(p, e[1], a)
       initLocExpr(p, e[2], b)
-      if d.k == locNone: getTemp(p, getSysType(p.module.g.graph, unknownLineInfo(), tyBool), d)
+      if d.k == locNone: getTemp(p, getSysType(p.module.g.graph, unknownLineInfo, tyBool), d)
       if op == mLtSet:
         linefmt(p, cpsStmts, lookupOpr[mLtSet],
            [rdLoc(i), size, rdLoc(d), rdLoc(a), rdLoc(b)])
@@ -1866,7 +1866,7 @@ proc genSetOp(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
       putIntoDest(p, d, e, ropecg(p.module, "(#nimCmpMem($1, $2, $3)==0)", [a.rdCharLoc, b.rdCharLoc, size]))
     of mMulSet, mPlusSet, mMinusSet, mSymDiffSet:
       # we inline the simple for loop for better code generation:
-      getTemp(p, getSysType(p.module.g.graph, unknownLineInfo(), tyInt), i) # our counter
+      getTemp(p, getSysType(p.module.g.graph, unknownLineInfo, tyInt), i) # our counter
       initLocExpr(p, e[1], a)
       initLocExpr(p, e[2], b)
       if d.k == locNone: getTemp(p, setType, d)
@@ -2178,7 +2178,10 @@ proc genMagicExpr(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   of mNew: genNew(p, e)
   of mNewFinalize:
     if optTinyRtti in p.config.globalOptions:
-      genNew(p, e)
+      var a: TLoc
+      initLocExpr(p, e[1], a)
+      rawGenNew(p, a, nil)
+      gcUsage(p.config, e)
     else:
       genNewFinalize(p, e)
   of mNewSeq: genNewSeq(p, e)
@@ -2319,7 +2322,7 @@ proc genSetConstr(p: BProc, e: PNode, d: var TLoc) =
           [rdLoc(d), getTypeDesc(p.module, e.typ)])
       for it in e.sons:
         if it.kind == nkRange:
-          getTemp(p, getSysType(p.module.g.graph, unknownLineInfo(), tyInt), idx) # our counter
+          getTemp(p, getSysType(p.module.g.graph, unknownLineInfo, tyInt), idx) # our counter
           initLocExpr(p, it[0], a)
           initLocExpr(p, it[1], b)
           lineF(p, cpsStmts, "for ($1 = $3; $1 <= $4; $1++) $n" &
@@ -2335,7 +2338,7 @@ proc genSetConstr(p: BProc, e: PNode, d: var TLoc) =
       lineF(p, cpsStmts, "$1 = 0;$n", [rdLoc(d)])
       for it in e.sons:
         if it.kind == nkRange:
-          getTemp(p, getSysType(p.module.g.graph, unknownLineInfo(), tyInt), idx) # our counter
+          getTemp(p, getSysType(p.module.g.graph, unknownLineInfo, tyInt), idx) # our counter
           initLocExpr(p, it[0], a)
           initLocExpr(p, it[1], b)
           lineF(p, cpsStmts, "for ($1 = $3; $1 <= $4; $1++) $n" &
@@ -2747,9 +2750,9 @@ proc getDefaultValue(p: BProc; typ: PType; info: TLineInfo): Rope =
       result = rope"{NIM_NIL, NIM_NIL}"
   of tyObject:
     var count = 0
-    result.add "{" 
+    result.add "{"
     getNullValueAuxT(p, t, t, t.n, nil, result, count, true, info)
-    result.add "}" 
+    result.add "}"
   of tyTuple:
     result = rope"{"
     for i in 0..<t.len:

@@ -53,6 +53,8 @@
 
 - Added `os.normalizePathEnd` for additional path sanitization.
 
+- Added `times.fromUnixFloat,toUnixFloat`, subsecond resolution versions of `fromUnix`,`toUnixFloat`.
+
 ## Library changes
 
 - `asyncdispatch.drain` now properly takes into account `selector.hasPendingOperations`
@@ -74,6 +76,10 @@
 
 - An `align` pragma can now be used for variables and object fields, similar
   to the `alignas` declaration modifier in C/C++.
+
+- `=sink` type bound operator is now optional. Compiler can now use combination
+  of `=destroy` and `copyMem` to move objects efficiently.
+
 
 ## Language changes
 
