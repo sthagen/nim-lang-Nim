@@ -525,7 +525,8 @@ proc genRecordFieldsAux(m: BModule, n: PNode,
       of nkOfBranch, nkElse:
         let k = lastSon(n[i])
         if k.kind != nkSym:
-          let a = genRecordFieldsAux(m, k, rectype, check, unionPrefix & "_i" & $i & ".")
+          let structName = "_" & mangleRecFieldName(m, n[0].sym) & "_" & $i
+          let a = genRecordFieldsAux(m, k, rectype, check, unionPrefix & $structName & ".")
           if a != nil:
             if tfPacked notin rectype.flags:
               unionBody.add("struct {")
@@ -535,7 +536,7 @@ proc genRecordFieldsAux(m: BModule, n: PNode,
               else:
                 unionBody.addf("#pragma pack(push, 1)$nstruct{", [])
             unionBody.add(a)
-            unionBody.addf("} _i$1;$n", [rope($i)])
+            unionBody.addf("} $1;$n", [structName])
             if tfPacked in rectype.flags and hasAttribute notin CC[m.config.cCompiler].props:
               unionBody.addf("#pragma pack(pop)$n", [])
         else:
@@ -953,7 +954,7 @@ proc genProcHeader(m: BModule, prc: PSym, asPtr: bool = false): Rope =
       result.add "N_LIB_EXPORT "
   elif prc.typ.callConv == ccInline or asPtr or isNonReloadable(m, prc):
     result.add "static "
-  elif {sfImportc, sfExportc} * prc.flags == {}:
+  elif sfImportc notin prc.flags:
     result.add "N_LIB_PRIVATE "
   var check = initIntSet()
   fillLoc(prc.loc, locProc, prc.ast[namePos], mangleName(m, prc), OnUnknown)
