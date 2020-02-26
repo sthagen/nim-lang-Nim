@@ -29,7 +29,8 @@
   are converted to `None`.
 - `relativePath("foo", "foo")` is now `"."`, not `""`, as `""` means invalid path
   and shouldn't be conflated with `"."`; use -d:nimOldRelativePathBehavior to restore the old
-  behavioe
+  behavior
+- `joinPath(a,b)` now honors trailing slashes in `b` (or `a` if `b` = "")
 
 ### Breaking changes in the compiler
 
@@ -131,3 +132,5 @@
   `ioselector_select` now properly handle the `Event.User` select event type.
 - `joinPath` path normalization when `/` is the first argument works correctly:
   `assert "/" / "/a" == "/a"`. Fixed the edgecase: `assert "" / "" == ""`.
+- `xmltree` now adds indentation consistently to child nodes for any number
+  of children nodes.
