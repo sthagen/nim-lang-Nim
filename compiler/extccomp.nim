@@ -998,10 +998,11 @@ proc writeJsonBuildInstructions*(conf: ConfigRef) =
       f.write escapeJson(x)
 
   proc cfiles(conf: ConfigRef; f: File; buf: var string; clist: CfileList, isExternal: bool) =
+    var comma = false
     for i, it in clist:
       if CfileFlag.Cached in it.flags: continue
       let compileCmd = getCompileCFileCmd(conf, it)
-      if i > 0: lit ",\L"
+      if comma: lit ",\L" else: comma = true
       lit "["
       str it.cname.string
       lit ", "
@@ -1137,7 +1138,7 @@ proc runJsonBuildInstructions*(conf: ConfigRef; projectfile: AbsoluteFile) =
 
   except:
     let e = getCurrentException()
-    quit "\ncaught exception:n" & e.msg & "\nstacktrace:\n" & e.getStackTrace() &
+    quit "\ncaught exception:\n" & e.msg & "\nstacktrace:\n" & e.getStackTrace() &
          "error evaluating JSON file: " & jsonFile.string
 
 proc genMappingFiles(conf: ConfigRef; list: CfileList): Rope =
