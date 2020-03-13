@@ -66,7 +66,7 @@
 - Added `sugar.collect` that does comprehension for seq/set/table collections.
 - Added `sugar.capture` for capturing some local loop variables when creating a closure.
   This is an enhanced version of `closureScope`.
-- Added `typetraits.lenTuple` to get number of elements of a tuple/type tuple,
+- Added `typetraits.tupleLen` to get number of elements of a tuple/type tuple,
   and `typetraits.get` to get the ith element of a type tuple.
 - Added `typetraits.genericParams` to return a tuple of generic params from a generic instantiation
 - Added `os.normalizePathEnd` for additional path sanitization.
@@ -161,6 +161,14 @@ echo f
 - The compiler now inferes "sink parameters". To disable this for a specific routine,
   annotate it with `.nosinks`. To disable it for a section of code, use
   `{.push sinkInference: off.}`...`{.pop.}`.
+- The compiler now supports a new switch `--panics:on` that turns runtime
+  errors like `IndexError` or `OverflowError` into fatal errors that **cannot**
+  be caught via Nim's `try` statement. `--panics:on` can improve the
+  runtime efficiency and code size of your program significantly.
+- The compiler now warns about inheriting directly from `system.Exception` as
+  this is **very bad** style. You should inherit from `ValueError`, `IOError`,
+  `OSError` or from a different specific exception type that inherits from
+  `CatchableError` and cannot be confused with a `Defect`.
 
 
 ## Bugfixes
