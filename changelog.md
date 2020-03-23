@@ -119,6 +119,9 @@ echo f
 - Added a new module, `std / compilesettings` for querying the compiler about
   diverse configuration settings.
 - `base64` adds URL-Safe Base64, implements RFC-4648 Section-7.
+- Added `net.getPeerCertificates` and `asyncnet.getPeerCertificates` for
+  retrieving the verified certificate chain of the peer we are connected to
+  through an SSL-wrapped `Socket`/`AsyncSocket`.
 
 
 ## Library changes
@@ -189,6 +192,7 @@ echo f
   this is **very bad** style. You should inherit from `ValueError`, `IOError`,
   `OSError` or from a different specific exception type that inherits from
   `CatchableError` and cannot be confused with a `Defect`.
+- The error reporting for Nim's effect system has been improved.
 
 
 ## Bugfixes
