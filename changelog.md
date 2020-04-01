@@ -14,7 +14,7 @@
 ### Breaking changes in the standard library
 
 - `base64.encode` no longer supports `lineLen` and `newLine`.
-  Use `base64.encodeMIME` instead.
+  Use `base64.encodeMime` instead.
 - `os.splitPath()` behavior synchronized with `os.splitFile()` to return "/"
    as the dir component of "/root_sub_dir" instead of the empty string.
 - `sequtils.zip` now returns a sequence of anonymous tuples i.e. those tuples
@@ -122,7 +122,7 @@ echo f
 - Added `net.getPeerCertificates` and `asyncnet.getPeerCertificates` for
   retrieving the verified certificate chain of the peer we are connected to
   through an SSL-wrapped `Socket`/`AsyncSocket`.
-
+- Added `distinctBase` overload for values: `assert 12.MyInt.distinctBase == 12`
 
 ## Library changes
 
@@ -149,7 +149,10 @@ echo f
 - `std/oswalkdir` was buggy, it's now deprecated and reuses `std/os` procs
 - `net.newContext` now performs SSL Certificate checking on Linux and OSX.
   Define `nimDisableCertificateValidation` to disable it globally.
-
+- new syntax for lvalue references: `var b {.byaddr.} = expr` enabled by `import pragmas`
+- new module `std/stackframes`, in particular `setFrameMsg` which enables
+  custom runtime annotation of stackframes, see #13351 for examples. Turn on/off via
+  `--stackTraceMsgs:on/off`
 
 ## Language additions
 
@@ -158,6 +161,11 @@ echo f
 
 - `=sink` type bound operator is now optional. Compiler can now use combination
   of `=destroy` and `copyMem` to move objects efficiently.
+
+- `var a {.foo.}: MyType = expr` now lowers to `foo(a, MyType, expr)` for non builtin pragmas,
+  enabling things like lvalue references, see `pragmas.byaddr`
+
+- `macro pragmas` can now be used in type sections.
 
 ## Language changes
 

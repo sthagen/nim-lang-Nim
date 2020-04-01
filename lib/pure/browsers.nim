@@ -25,7 +25,8 @@ const osOpenCmd* =
   ## ``"open"`` on MacOS and Windows, ``"xdg-open"`` on Linux, BSD, etc.
 
 proc openDefaultBrowser*(url: string) =
-  ## opens `url` with the user's default browser. This does not block.
+  ## Opens `url` with the user's default browser. This does not block.
+  ## The URL must not be empty string.
   ##
   ## Under Windows, ``ShellExecute`` is used. Under Mac OS X the ``open``
   ## command is used. Under Unix, it is checked if ``xdg-open`` exists and
@@ -33,6 +34,10 @@ proc openDefaultBrowser*(url: string) =
   ## used to determine the default browser to use.
   ##
   ## This proc doesn't raise an exception on error, beware.
+  ##
+  ## .. code-block:: nim
+  ##   block: openDefaultBrowser("https://nim-lang.org")
+  doAssert url.len > 0, "URL must not be empty string"
   when defined(windows):
     var o = newWideCString(osOpenCmd)
     var u = newWideCString(url)
