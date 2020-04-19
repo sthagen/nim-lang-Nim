@@ -62,12 +62,18 @@ proc semOperand(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
                renderTree(result, {renderNoComments}))
     result.typ = errorType(c)
 
-proc semExprWithType(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
+proc semExprCheck(c: PContext, n: PNode, flags: TExprFlags): PNode =
   rejectEmptyNode(n)
   result = semExpr(c, n, flags+{efWantValue})
   if result.kind == nkEmpty:
+    # bug #12741, redundant error messages are the lesser evil here:
+    localError(c.config, n.info, errExprXHasNoType %
+                renderTree(result, {renderNoComments}))
     # do not produce another redundant error message:
     result = errorNode(c, n)
+
+proc semExprWithType(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
+  result = semExprCheck(c, n, flags)
   if result.typ == nil or result.typ == c.enforceVoidContext:
     localError(c.config, n.info, errExprXHasNoType %
                 renderTree(result, {renderNoComments}))
@@ -76,11 +82,7 @@ proc semExprWithType(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
     if result.typ.kind in {tyVar, tyLent}: result = newDeref(result)
 
 proc semExprNoDeref(c: PContext, n: PNode, flags: TExprFlags = {}): PNode =
-  rejectEmptyNode(n)
-  result = semExpr(c, n, flags+{efWantValue})
-  if result.kind == nkEmpty:
-    # do not produce another redundant error message:
-    result = errorNode(c, n)
+  result = semExprCheck(c, n, flags)
   if result.typ == nil:
     localError(c.config, n.info, errExprXHasNoType %
                renderTree(result, {renderNoComments}))
@@ -189,6 +191,11 @@ proc isCastable(conf: ConfigRef; dst, src: PType): bool =
     return false
   if skipTypes(src, abstractInst-{tyTypeDesc}).kind == tyTypeDesc:
     return false
+  if conf.selectedGC in {gcArc, gcOrc}:
+    let d = skipTypes(dst, abstractInst)
+    let s = skipTypes(src, abstractInst)
+    if d.kind == tyRef and s.kind == tyRef and s[0].isFinal != d[0].isFinal:
+      return false
 
   var dstSize, srcSize: BiggestInt
   dstSize = computeSize(conf, dst)
@@ -622,11 +629,12 @@ proc isAssignable(c: PContext, n: PNode; isUnsafeAddr=false): TAssignableResult 
   result = parampatterns.isAssignable(c.p.owner, n, isUnsafeAddr)
 
 proc isUnresolvedSym(s: PSym): bool =
-  return s.kind == skGenericParam or
-         tfInferrableStatic in s.typ.flags or
-         (s.kind == skParam and s.typ.isMetaType) or
-         (s.kind == skType and
-          s.typ.flags * {tfGenericTypeParam, tfImplicitTypeParam} != {})
+  result = s.kind == skGenericParam
+  if not result and s.typ != nil:
+    result = tfInferrableStatic in s.typ.flags or
+        (s.kind == skParam and s.typ.isMetaType) or
+        (s.kind == skType and
+        s.typ.flags * {tfGenericTypeParam, tfImplicitTypeParam} != {})
 
 proc hasUnresolvedArgs(c: PContext, n: PNode): bool =
   # Checks whether an expression depends on generic parameters that
@@ -1576,9 +1584,13 @@ proc takeImplicitAddr(c: PContext, n: PNode; isLent: bool): PNode =
         root.name.s, renderTree(n, {renderNoComments}), explanationsBaseUrl])
   case n.kind
   of nkHiddenAddr, nkAddr: return n
-  of nkHiddenDeref, nkDerefExpr: return n[0]
+  of nkDerefExpr: return n[0]
   of nkBracketExpr:
     if n.len == 1: return n[0]
+  of nkHiddenDeref:
+    # issue #13848
+    # `proc fun(a: var int): var int = a`
+    discard
   else: discard
   let valid = isAssignable(c, n, isLent)
   if valid != arLValue:
