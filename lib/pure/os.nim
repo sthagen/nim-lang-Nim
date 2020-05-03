@@ -42,6 +42,7 @@
 ## * `streams module <streams.html>`_
 
 include "system/inclrtl"
+import std/private/since
 
 import
   strutils, pathnorm
@@ -797,9 +798,9 @@ proc cmpPaths*(pathA, pathB: string): int {.
   ## On a case-sensitive filesystem this is done
   ## case-sensitively otherwise case-insensitively. Returns:
   ##
-  ## | 0 iff pathA == pathB
-  ## | < 0 iff pathA < pathB
-  ## | > 0 iff pathA > pathB
+  ## | 0 if pathA == pathB
+  ## | < 0 if pathA < pathB
+  ## | > 0 if pathA > pathB
   runnableExamples:
     when defined(macosx):
       assert cmpPaths("foo", "Foo") == 0
@@ -1078,7 +1079,7 @@ when defined(windows) and not weirdTarget:
     template findNextFile(a, b: untyped): untyped = findNextFileA(a, b)
     template getCommandLine(): untyped = getCommandLineA()
 
-    template getFilename(f: untyped): untyped = $f.cFileName
+    template getFilename(f: untyped): untyped = $cstring(addr f.cFileName)
 
   proc skipFindData(f: WIN32_FIND_DATA): bool {.inline.} =
     # Note - takes advantage of null delimiter in the cstring
@@ -1108,7 +1109,7 @@ proc existsFile*(filename: string): bool {.rtl, extern: "nos$1",
 
 proc existsDir*(dir: string): bool {.rtl, extern: "nos$1", tags: [ReadDirEffect],
                                      noNimScript.} =
-  ## Returns true iff the directory `dir` exists. If `dir` is a file, false
+  ## Returns true if the directory `dir` exists. If `dir` is a file, false
   ## is returned. Follows symlinks.
   ##
   ## See also:
@@ -1128,7 +1129,7 @@ proc existsDir*(dir: string): bool {.rtl, extern: "nos$1", tags: [ReadDirEffect]
 proc symlinkExists*(link: string): bool {.rtl, extern: "nos$1",
                                           tags: [ReadDirEffect],
                                           noNimScript.} =
-  ## Returns true iff the symlink `link` exists. Will return true
+  ## Returns true if the symlink `link` exists. Will return true
   ## regardless of whether the link points to a directory or file.
   ##
   ## See also:
@@ -2678,7 +2679,7 @@ when defined(nimdoc):
   proc paramStr*(i: int): TaintedString {.tags: [ReadIOEffect].} =
     ## Returns the `i`-th `command line argument`:idx: given to the application.
     ##
-    ## `i` should be in the range `1..paramCount()`, the `IndexError`
+    ## `i` should be in the range `1..paramCount()`, the `IndexDefect`
     ## exception will be raised for invalid values.  Instead of iterating over
     ## `paramCount() <#paramCount>`_ with this proc you can call the
     ## convenience `commandLineParams() <#commandLineParams>`_.
@@ -2707,7 +2708,23 @@ when defined(nimdoc):
     ##   else:
     ##     # Do something else!
 
-elif defined(nintendoswitch) or weirdTarget:
+elif defined(nimscript):
+  proc paramStr*(i: int): string =
+    ## Retrieves the ``i``'th command line parameter.
+    discard
+
+  proc paramCount*(): int =
+    ## Retrieves the number of command line parameters.
+    discard
+
+elif defined(js):
+  proc paramStr*(i: int): TaintedString {.tags: [ReadIOEffect].} =
+    raise newException(OSError, "paramStr is not implemented on JavaScript")
+
+  proc paramCount*(): int {.tags: [ReadIOEffect].} =
+    raise newException(OSError, "paramCount is not implemented on JavaScript")
+
+elif defined(nintendoswitch):
   proc paramStr*(i: int): TaintedString {.tags: [ReadIOEffect].} =
     raise newException(OSError, "paramStr is not implemented on Nintendo Switch")
 
@@ -2738,7 +2755,7 @@ elif defined(windows):
       ownArgv = parseCmdLine($getCommandLine())
       ownParsedArgv = true
     if i < ownArgv.len and i >= 0: return TaintedString(ownArgv[i])
-    raise newException(IndexError, formatErrorIndexBound(i, ownArgv.len-1))
+    raise newException(IndexDefect, formatErrorIndexBound(i, ownArgv.len-1))
 
 elif defined(genode):
   proc paramStr*(i: int): TaintedString =
@@ -2757,7 +2774,7 @@ elif not defined(createNimRtl) and
   proc paramStr*(i: int): TaintedString {.tags: [ReadIOEffect].} =
     # Docstring in nimdoc block.
     if i < cmdCount and i >= 0: return TaintedString($cmdLine[i])
-    raise newException(IndexError, formatErrorIndexBound(i, cmdCount-1))
+    raise newException(IndexDefect, formatErrorIndexBound(i, cmdCount-1))
 
   proc paramCount*(): int {.tags: [ReadIOEffect].} =
     # Docstring in nimdoc block.
@@ -3103,7 +3120,7 @@ template rawToFormalFileInfo(rawInfo, path, formalInfo): untyped =
       assert(path != "") # symlinks can't occur for file handles
       formalInfo.kind = getSymlinkFileKind(path)
 
-when defined(js):
+when defined(js) or defined(nimscript):
   when not declared(FileHandle):
     type FileHandle = distinct int32
   when not declared(File):

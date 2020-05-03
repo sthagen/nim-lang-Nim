@@ -199,7 +199,7 @@ proc kill*(p: Process) {.rtl, extern: "nosp$1", tags: [].}
   ## * `terminate proc <#terminate,Process>`_
 
 proc running*(p: Process): bool {.rtl, extern: "nosp$1", tags: [].}
-  ## Returns true iff the process `p` is still running. Returns immediately.
+  ## Returns true if the process `p` is still running. Returns immediately.
 
 proc processID*(p: Process): int {.rtl, extern: "nosp$1".} =
   ## Returns `p`'s process ID.
@@ -626,8 +626,11 @@ when defined(Windows) and not defined(useNimRtl):
       success = winlean.createProcessW(nil, tmp, nil, nil, 1, flags,
         ee, wwd, si, procInfo)
     else:
+      var ee =
+        if e.str.isNil: cstring(nil)
+        else: cstring(e.str)
       success = winlean.createProcessA(nil,
-        cmdl, nil, nil, 1, NORMAL_PRIORITY_CLASS, e, wd, si, procInfo)
+        cmdl, nil, nil, 1, NORMAL_PRIORITY_CLASS, ee, wd, si, procInfo)
     let lastError = osLastError()
 
     if poParentStreams notin options:

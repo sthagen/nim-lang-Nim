@@ -548,7 +548,8 @@ proc allowsNilDeprecated(c: TCandidate, f: PType): TTypeRelation =
     result = isNone
 
 proc inconsistentVarTypes(f, a: PType): bool {.inline.} =
-  result = f.kind != a.kind and (f.kind in {tyVar, tyLent} or a.kind in {tyVar, tyLent})
+  result = f.kind != a.kind and
+    (f.kind in {tyVar, tyLent, tySink} or a.kind in {tyVar, tyLent, tySink})
 
 proc procParamTypeRel(c: var TCandidate, f, a: PType): TTypeRelation =
   ## For example we have:
@@ -1822,9 +1823,11 @@ proc typeRel(c: var TCandidate, f, aOrig: PType,
         if not exprStructuralEquivalent(aOrig.n, reevaluated.typ.n):
           result = isNone
     else:
-      localError(c.c.graph.config, f.n.info, "type expected")
-      result = isNone
-
+      # bug #14136: other types are just like 'tyStatic' here:
+      result = typeRel(c, a, reevaluated.typ)
+      if result != isNone and reevaluated.typ.n != nil:
+        if not exprStructuralEquivalent(aOrig.n, reevaluated.typ.n):
+          result = isNone
   of tyNone:
     if a.kind == tyNone: result = isEqual
   else:
@@ -2583,8 +2586,11 @@ proc argtypeMatches*(c: PContext, f, a: PType, fromHlo = false): bool =
     # pattern templates do not allow for conversions except from int literal
     res != nil and m.convMatches == 0 and m.intConvMatches in [0, 256]
 
+when not defined(nimHasSinkInference):
+  {.pragma: nosinks.}
+
 proc instTypeBoundOp*(c: PContext; dc: PSym; t: PType; info: TLineInfo;
-                      op: TTypeAttachedOp; col: int): PSym =
+                      op: TTypeAttachedOp; col: int): PSym {.nosinks.} =
   var m = newCandidate(c, dc.typ)
   if col >= dc.typ.len:
     localError(c.config, info, "cannot instantiate: '" & dc.name.s & "'")

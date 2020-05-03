@@ -99,6 +99,7 @@ proc semEnum(c: PContext, n: PNode, prev: PType): PType =
             if not isOrdinalType(v[0].typ, allowEnumWithHoles=true):
               localError(c.config, v[0].info, errOrdinalTypeExpected & "; given: " & typeToString(v[0].typ, preferDesc))
             x = toInt64(getOrdValue(v[0])) # first tuple part is the ordinal
+            n[i][1][0] = newIntTypeNode(x, getSysType(c.graph, unknownLineInfo, tyInt))
           else:
             localError(c.config, strVal.info, errStringLiteralExpected)
         else:
@@ -110,6 +111,7 @@ proc semEnum(c: PContext, n: PNode, prev: PType): PType =
         if not isOrdinalType(v.typ, allowEnumWithHoles=true):
           localError(c.config, v.info, errOrdinalTypeExpected & "; given: " & typeToString(v.typ, preferDesc))
         x = toInt64(getOrdValue(v))
+        n[i][1] = newIntTypeNode(x, getSysType(c.graph, unknownLineInfo, tyInt))
       if i != 1:
         if x != counter: incl(result.flags, tfEnumHasHoles)
         if x < counter:
@@ -693,7 +695,7 @@ proc semRecordCase(c: PContext, n: PNode, check: var IntSet, pos: var int,
     of nkElse:
       checkSonsLen(b, 1, c.config)
       if chckCovered and covered == toCover(c, a[0].typ):
-        localError(c.config, b.info, "invalid else, all cases are already covered")
+        message(c.config, b.info, warnUnreachableElse)
       chckCovered = false
     else: illFormedAst(n, c.config)
     delSon(b, b.len - 1)
@@ -721,7 +723,7 @@ proc semRecordNodeAux(c: PContext, n: PNode, check: var IntSet, pos: var int,
         checkSonsLen(it, 2, c.config)
         if c.inGenericContext == 0:
           var e = semConstBoolExpr(c, it[0])
-          if e.kind != nkIntLit: internalError(c.config, e.info, "semRecordNodeAux")
+          if e.kind != nkIntLit: discard "don't report followup error"
           elif e.intVal != 0 and branch == nil: branch = it[1]
         else:
           it[0] = forceBool(c, semExprWithType(c, it[0]))

@@ -26,11 +26,11 @@
 ##
 ## .. code-block:: Nim
 ## import asyncdispatch, httpclient
-## 
+##
 ## proc asyncProc(): Future[string] {.async.} =
 ##   var client = newAsyncHttpClient()
 ##   return await client.getContent("http://example.com")
-## 
+##
 ## echo waitFor asyncProc()
 ##
 ## The functionality implemented by ``HttpClient`` and ``AsyncHttpClient``
@@ -200,7 +200,7 @@
 ##    let client = newHttpClient(maxRedirects = 0)
 ##
 
-include "system/inclrtl"
+import std/private/since
 
 import net, strutils, uri, parseutils, base64, os, mimetypes, streams,
   math, random, httpcore, times, tables, streams, std/monotimes
@@ -225,7 +225,7 @@ type
     bodyStream*: FutureStream[string]
 
 proc code*(response: Response | AsyncResponse): HttpCode
-           {.raises: [ValueError, OverflowError].} =
+           {.raises: [ValueError, OverflowDefect].} =
   ## Retrieves the specified response's ``HttpCode``.
   ##
   ## Raises a ``ValueError`` if the response's ``status`` does not have a

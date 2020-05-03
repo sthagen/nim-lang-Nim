@@ -1824,7 +1824,10 @@ template injectG() {.dirty.} =
     graph.backend = newModuleList(graph)
   let g = BModuleList(graph.backend)
 
-proc myOpen(graph: ModuleGraph; module: PSym): PPassContext =
+when not defined(nimHasSinkInference):
+  {.pragma: nosinks.}
+
+proc myOpen(graph: ModuleGraph; module: PSym): PPassContext {.nosinks.} =
   injectG()
   result = newModule(g, module, graph.config)
   if optGenIndex in graph.config.globalOptions and g.generatedHeader == nil:
@@ -2019,8 +2022,9 @@ proc myClose(graph: ModuleGraph; b: PPassContext, n: PNode): PNode =
     if m.config.exc == excGoto and getCompilerProc(graph, "nimTestErrorFlag") != nil:
       discard cgsym(m, "nimTestErrorFlag")
 
-    for i in countdown(high(graph.globalDestructors), 0):
-      n.add graph.globalDestructors[i]
+    if {optGenStaticLib, optGenDynLib} * m.config.globalOptions == {}:
+      for i in countdown(high(graph.globalDestructors), 0):
+        n.add graph.globalDestructors[i]
   if passes.skipCodegen(m.config, n): return
   if moduleHasChanged(graph, m.module):
     # if the module is cached, we don't regenerate the main proc

@@ -752,7 +752,7 @@ proc track(tracked: PEffects, n: PNode) =
       createTypeBoundOps(tracked, n[0].typ, n.info)
     else:
       # A `raise` with no arguments means we're going to re-raise the exception
-      # being handled or, if outside of an `except` block, a `ReraiseError`.
+      # being handled or, if outside of an `except` block, a `ReraiseDefect`.
       # Here we add a `Exception` tag in order to cover both the cases.
       addEffect(tracked, createRaise(tracked.graph, n), nil)
   of nkCallKinds:
@@ -829,8 +829,9 @@ proc track(tracked: PEffects, n: PNode) =
           if op != nil:
             n[0].sym = op
 
-    for i in 0..<n.safeLen:
-      track(tracked, n[i])
+    if a.kind != nkSym or a.sym.magic != mRunnableExamples:
+      for i in 0..<n.safeLen:
+        track(tracked, n[i])
     if op != nil and op.kind == tyProc:
       for i in 1..<min(n.safeLen, op.len):
         if op[i].kind == tySink:
@@ -854,7 +855,8 @@ proc track(tracked: PEffects, n: PNode) =
     when false: cstringCheck(tracked, n)
     if tracked.owner.kind != skMacro:
       createTypeBoundOps(tracked, n[0].typ, n.info)
-    checkForSink(tracked.config, tracked.owner, n[1])
+    if n[0].kind != nkSym or not isLocalVar(tracked, n[0].sym):
+      checkForSink(tracked.config, tracked.owner, n[1])
   of nkVarSection, nkLetSection:
     for child in n:
       let last = lastSon(child)
