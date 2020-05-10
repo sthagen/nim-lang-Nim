@@ -61,6 +61,10 @@
 - `paramCount` & `paramStr` are now defined in os.nim instead of nimscript.nim for nimscript/nimble.
 - `dollars.$` now works for unsigned ints with `nim js`
 
+- Improvements to the `bitops` module, including bitslices, non-mutating versions
+  of the original masking functions, `mask`/`masked`, and varargs support for
+  `bitand`, `bitor`, and `bitxor`.
+
 - `sugar.=>` and `sugar.->` changes: Previously `(x, y: int)` was transformed
   into `(x: auto, y: int)`, it now becomes `(x: int, y: int)` in consistency
   with regular proc definitions (although you cannot use semicolons).
@@ -76,6 +80,11 @@
 
   proc foo(x: int, y: int): auto {.noSideEffect.} = x + y
   ```
+- The fields of `times.DateTime` are now private, and are accessed with getters and deprecated setters.
+
+- The `times` module now handles the default value for `DateTime` more consistently. Most procs raise an assertion error when given
+  an uninitialized `DateTime`, the exceptions are `==` and `$` (which returns `"Uninitialized DateTime"`). The proc `times.isInitialized`
+  has been added which can be used to check if a `DateTime` has been initialized.
 
 ## Language changes
 - In newruntime it is now allowed to assign discriminator field without restrictions as long as case object doesn't have custom destructor. Discriminator value doesn't have to be a constant either. If you have custom destructor for case object and you do want to freely assign discriminator fields, it is recommended to refactor object into 2 objects like this:
@@ -111,6 +120,8 @@
   with writing typed macros. Old behavior for backwards compatiblity can be restored
   with command line switch `--useVersion:1.0`.
 
+- The keyword `from` is now usable as an operator.
+
 ## Compiler changes
 
 - Specific warnings can now be turned into errors via `--warningAsError[X]:on|off`.
@@ -126,6 +137,10 @@
   nim r compiler/nim.nim --fullhelp # no recompilation
   nim r --nimcache:/tmp main # binary saved to /tmp/main
   ```
+- `--hint:processing` is now supported and means `--hint:processing:on`
+  (likewise with other hints and warnings), which is consistent with all other bool flags.
+  (since 1.3.3).
+- `nim doc -r main` and `nim rst2html -r main` now call openDefaultBrowser
 
 ## Tool changes
 
