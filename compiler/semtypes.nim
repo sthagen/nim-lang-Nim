@@ -942,10 +942,8 @@ proc semAnyRef(c: PContext; n: PNode; kind: TTypeKind; prev: PType): PType =
       t.rawAddSonNoPropagationOfTypeFlags result
       result = t
     else: discard
-    #if result.kind == tyRef and c.config.selectedGC == gcDestructors:
-    #  result.flags.incl tfHasAsgn
-    # XXX Something like this is a good idea but it should be done
-    # in sempass2!
+    if result.kind == tyRef and c.config.selectedGC in {gcArc, gcOrc}:
+      result.flags.incl tfHasAsgn
 
 proc findEnforcedStaticType(t: PType): PType =
   # This handles types such as `static[T] and Foo`,
@@ -1293,7 +1291,7 @@ proc semProcTypeNode(c: PContext, n, genericParams: PNode,
     r = semTypeNode(c, n[0], nil)
 
   if r != nil and kind in {skMacro, skTemplate} and r.kind == tyTyped:
-    # XXX: To implement the propesed change in the warning, just
+    # XXX: To implement the proposed change in the warning, just
     # delete this entire if block. The rest is (at least at time of
     # writing this comment) already implemented.
     let info = n[0].info

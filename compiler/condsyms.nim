@@ -117,3 +117,5 @@ proc initDefines*(symbols: StringTableRef) =
   defineSymbol("nimNewIntegerOps")
   defineSymbol("nimHasInvariant")
   defineSymbol("nimHasStacktraceMsgs")
+  defineSymbol("nimDoesntTrackDefects")
+  defineSymbol("nimHasLentIterators")

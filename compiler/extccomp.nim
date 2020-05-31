@@ -306,15 +306,14 @@ proc isVSCompatible*(conf: ConfigRef): bool =
 proc getConfigVar(conf: ConfigRef; c: TSystemCC, suffix: string): string =
   # use ``cpu.os.cc`` for cross compilation, unless ``--compileOnly`` is given
   # for niminst support
-  let fullSuffix =
-    if conf.cmd == cmdCompileToCpp:
-      ".cpp" & suffix
-    elif conf.cmd == cmdCompileToOC:
-      ".objc" & suffix
-    elif conf.cmd == cmdCompileToJS:
-      ".js" & suffix
-    else:
-      suffix
+  var fullSuffix = suffix
+  case conf.backend
+  of backendCpp, backendJs, backendObjc: fullSuffix = "." & $conf.backend & suffix
+  of backendC: discard
+  of backendInvalid:
+    # during parsing of cfg files; we don't know the backend yet, no point in
+    # guessing wrong thing
+    return ""
 
   if (conf.target.hostOS != conf.target.targetOS or conf.target.hostCPU != conf.target.targetCPU) and
       optCompileOnly notin conf.globalOptions:
@@ -481,10 +480,10 @@ proc needsExeExt(conf: ConfigRef): bool {.inline.} =
            (conf.target.hostOS == osWindows)
 
 proc useCpp(conf: ConfigRef; cfile: AbsoluteFile): bool =
-  conf.cmd == cmdCompileToCpp and not cfile.string.endsWith(".c")
+  conf.backend == backendCpp and not cfile.string.endsWith(".c")
 
 proc envFlags(conf: ConfigRef): string =
-  result = if conf.cmd == cmdCompileToCpp:
+  result = if conf.backend == backendCpp:
             getEnv("CXXFLAGS")
           else:
             getEnv("CFLAGS")
@@ -535,7 +534,7 @@ proc ccHasSaneOverflow*(conf: ConfigRef): bool =
 
 proc getLinkerExe(conf: ConfigRef; compiler: TSystemCC): string =
   result = if CC[compiler].linkerExe.len > 0: CC[compiler].linkerExe
-           elif optMixedMode in conf.globalOptions and conf.cmd != cmdCompileToCpp: CC[compiler].cppCompiler
+           elif optMixedMode in conf.globalOptions and conf.backend != backendCpp: CC[compiler].cppCompiler
            else: getCompilerExe(conf, compiler, AbsoluteFile"")
 
 proc getCompileCFileCmd*(conf: ConfigRef; cfile: Cfile,
@@ -626,8 +625,10 @@ proc footprint(conf: ConfigRef; cfile: Cfile): SecureHash =
     getCompileCFileCmd(conf, cfile))
 
 proc externalFileChanged(conf: ConfigRef; cfile: Cfile): bool =
-  if conf.cmd notin {cmdCompileToC, cmdCompileToCpp, cmdCompileToOC, cmdCompileToLLVM, cmdNone}:
-    return false
+  case conf.backend
+  of backendInvalid: doAssert false
+  of backendJs: return false # pre-existing behavior, but not sure it's good
+  else: discard
 
   var hashFile = toGeneratedFile(conf, conf.withPackageName(cfile.cname), "sha1")
   var currentHash = footprint(conf, cfile)

@@ -742,7 +742,7 @@ proc matchUserTypeClass*(m: var TCandidate; ff, a: PType): PType =
       addDecl(c, param)
 
   var
-    oldWriteHook: type(m.c.config.writelnHook)
+    oldWriteHook: typeof(m.c.config.writelnHook)
     diagnostics: seq[string]
     errorPrefix: string
     flags: TExprFlags = {}
@@ -992,6 +992,11 @@ proc typeRel(c: var TCandidate, f, aOrig: PType,
 
   result = isNone
   assert(f != nil)
+
+  when declared(deallocatedRefId):
+    let corrupt = deallocatedRefId(cast[pointer](f))
+    if corrupt != 0:
+      quit "it's corrupt " & $corrupt
 
   if f.kind == tyUntyped:
     if aOrig != nil: put(c, f, aOrig)
@@ -1409,7 +1414,6 @@ proc typeRel(c: var TCandidate, f, aOrig: PType,
     let roota = a.skipGenericAlias
     let rootf = f.skipGenericAlias
 
-    var m = c
     if a.kind == tyGenericInst:
       if roota.base == rootf.base:
         let nextFlags = flags + {trNoCovariance}

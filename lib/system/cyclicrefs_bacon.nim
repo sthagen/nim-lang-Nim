@@ -24,7 +24,6 @@ const
   colPurple = 0b011
   isCycleCandidate = 0b100 # cell is marked as a cycle candidate
   jumpStackFlag = 0b1000
-  rcShift = 4      # shift by rcShift to get the reference counter
   colorMask = 0b011
 
 type
@@ -89,15 +88,15 @@ proc nimTraceRefDyn(q: pointer; env: pointer) {.compilerRtl.} =
     j.traceStack.add(head p[], cast[ptr PNimType](p[])[])
 
 var
-  roots: CellSeq
+  roots {.threadvar.}: CellSeq
 
 proc unregisterCycle(s: Cell) =
   # swap with the last element. O(1)
   let idx = s.rootIdx
-  if idx >= roots.len or idx < 0:
-    cprintf("[Bug!] %ld\n", idx)
-    quit 1
-
+  when false:
+    if idx >= roots.len or idx < 0:
+      cprintf("[Bug!] %ld\n", idx)
+      quit 1
   roots.d[idx] = roots.d[roots.len-1]
   roots.d[idx][0].rootIdx = idx
   dec roots.len

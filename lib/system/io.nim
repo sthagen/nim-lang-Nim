@@ -501,11 +501,6 @@ proc readAll*(file: File): TaintedString {.tags: [ReadIOEffect], benign.} =
   else:
     result = readAllBuffer(file).TaintedString
 
-proc writeLn[Ty](f: File, x: varargs[Ty, `$`]) =
-  for i in items(x):
-    write(f, i)
-  write(f, "\n")
-
 proc writeLine*[Ty](f: File, x: varargs[Ty, `$`]) {.inline,
                           tags: [WriteIOEffect], benign.} =
   ## writes the values `x` to `f` and then writes "\\n".
@@ -733,7 +728,7 @@ when declared(stdout):
         releaseSys echoLock
 
 
-when defined(windows) and not defined(nimscript):
+when defined(windows) and not defined(nimscript) and not defined(js):
   # work-around C's sucking abstraction:
   # BUGFIX: stdin and stdout should be binary files!
   proc c_setmode(handle, mode: cint) {.

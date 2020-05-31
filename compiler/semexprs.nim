@@ -660,7 +660,7 @@ proc hasUnresolvedArgs(c: PContext, n: PNode): bool =
     return false
 
 proc newHiddenAddrTaken(c: PContext, n: PNode): PNode =
-  if n.kind == nkHiddenDeref and not (c.config.cmd == cmdCompileToCpp or
+  if n.kind == nkHiddenDeref and not (c.config.backend == backendCpp or
                                       sfCompileToCpp in c.module.flags):
     checkSonsLen(n, 1, c.config)
     result = n[0]
@@ -1572,12 +1572,13 @@ proc takeImplicitAddr(c: PContext, n: PNode; isLent: bool): PNode =
   # return a view into the first argument (if there is one):
   let root = exprRoot(n)
   if root != nil and root.owner == c.p.owner:
+    template url: string = "var_t_return.html".createDocLink
     if root.kind in {skLet, skVar, skTemp} and sfGlobal notin root.flags:
-      localError(c.config, n.info, "'$1' escapes its stack frame; context: '$2'; see $3/var_t_return.html" % [
-        root.name.s, renderTree(n, {renderNoComments}), explanationsBaseUrl])
+      localError(c.config, n.info, "'$1' escapes its stack frame; context: '$2'; see $3" % [
+        root.name.s, renderTree(n, {renderNoComments}), url])
     elif root.kind == skParam and root.position != 0:
-      localError(c.config, n.info, "'$1' is not the first parameter; context: '$2'; see $3/var_t_return.html" % [
-        root.name.s, renderTree(n, {renderNoComments}), explanationsBaseUrl])
+      localError(c.config, n.info, "'$1' is not the first parameter; context: '$2'; see $3" % [
+        root.name.s, renderTree(n, {renderNoComments}), url])
   case n.kind
   of nkHiddenAddr, nkAddr: return n
   of nkDerefExpr: return n[0]
@@ -1711,7 +1712,7 @@ proc semAsgn(c: PContext, n: PNode; mode=asgnNormal): PNode =
   if le == nil:
     localError(c.config, a.info, "expression has no type")
   elif (skipTypes(le, {tyGenericInst, tyAlias, tySink}).kind != tyVar and
-        isAssignable(c, a) == arNone) or
+        isAssignable(c, a) in {arNone, arLentValue}) or
       skipTypes(le, abstractVar).kind in {tyOpenArray, tyVarargs}:
     # Direct assignment to a discriminant is allowed!
     localError(c.config, a.info, errXCannotBeAssignedTo %

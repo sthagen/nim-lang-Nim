@@ -148,7 +148,7 @@ It is mostly accurate to picture semantic analysis proceeding top to bottom and
 left to right in the source code, with compile-time code execution interleaved
 when necessary to compute values that are required for subsequent semantic
 analysis. We will see much later in this document that macro invocation not only
-requires this interleaving, but also creates a situation where semantic analyis
+requires this interleaving, but also creates a situation where semantic analysis
 does not entirely proceed top to bottom and left to right.
 
 
@@ -792,7 +792,7 @@ features supported at compile time (as detailed in the next section below).
 Within such a code block, it is possible to declare variables and then later
 read and update them, or declare variables and pass them to procedures that
 modify them. However, the code in such a block must still adhere to the
-retrictions listed above for referencing values and operations outside the
+restrictions listed above for referencing values and operations outside the
 block.
 
 The ability to access and modify compile-time variables adds flexibility to
@@ -1296,7 +1296,7 @@ A parameter ``A`` may be an *open array*, in which case it is indexed by
 integers from 0 to ``len(A)-1``. An array expression may be constructed by the
 array constructor ``[]``. The element type of this array expression is
 inferred from the type of the first element. All other elements need to be
-implicitly convertable to this type.
+implicitly convertible to this type.
 
 Sequences are similar to arrays but of dynamic length which may change
 during runtime (like strings). Sequences are implemented as growable arrays,
@@ -1802,7 +1802,7 @@ Mixing GC'ed memory with ``ptr``
 
 Special care has to be taken if an untraced object contains traced objects like
 traced references, strings or sequences: in order to free everything properly,
-the built-in procedure ``GCunref`` has to be called before freeing the untraced
+the built-in procedure ``reset`` has to be called before freeing the untraced
 memory manually:
 
 .. code-block:: nim
@@ -1816,12 +1816,12 @@ memory manually:
   d.s = "abc"
 
   # tell the GC that the string is not needed anymore:
-  GCunref(d.s)
+  reset(d.s)
 
   # free the memory:
   dealloc(d)
 
-Without the ``GCunref`` call the memory allocated for the ``d.s`` string would
+Without the ``reset`` call the memory allocated for the ``d.s`` string would
 never be freed. The example also demonstrates two important features for low
 level programming: the ``sizeof`` proc returns the size of a type or value
 in bytes. The ``cast`` operator can circumvent the type system: the compiler
@@ -1916,6 +1916,10 @@ Nim supports these `calling conventions`:idx:\:
 `fastcall`:idx:
     Fastcall means different things to different C compilers. One gets whatever
     the C ``__fastcall`` means.
+
+`thiscall`:idx:
+    This is thiscall calling convention as specified by Microsoft, used on C++
+    class member functions on the x86 architecture
 
 `syscall`:idx:
     The syscall convention is the same as ``__syscall`` in C. It is used for
@@ -2336,7 +2340,7 @@ The convertible relation can be relaxed by a user-defined type
   # implicit conversion magic happens here
   x = chr
   echo x # => 97
-  # you can use the explicit form too
+  # one can use the explicit form too
   x = chr.toInt
   echo x # => 97
 
@@ -2678,6 +2682,11 @@ Let variables are not l-values and can thus not be passed to ``var`` parameters
 nor can their address be taken. They cannot be assigned new values.
 
 For let variables the same pragmas are available as for ordinary variables.
+
+As ``let`` statements are immutable after creation they need to define a value
+when they are declared. The only exception to this is if the ``{.importc.}``
+pragma (or any of the other ``importX`` pragmas) is applied, in this case the
+value is expected to come from native code, typically a C/C++ ``const``.
 
 
 Tuple unpacking
@@ -3128,6 +3137,7 @@ If expression
 -------------
 
 An `if expression` is almost like an if statement, but it is an expression.
+This feature is similar to `ternary operators` in other languages.
 Example:
 
 .. code-block:: nim
@@ -3701,6 +3711,75 @@ location is derived from the second parameter (called
 ``varTy[T, 2]`` which is incompatible with ``varTy[T, 1]``.
 
 
+NRVO
+----
+
+**Note**: This section describes the current implementation. This part
+of the language specification will be changed.
+See https://github.com/nim-lang/RFCs/issues/230 for more information.
+
+The return value is represented inside the body of a routine as the special
+`result`:idx: variable. This allows for a mechanism much like C++'s
+"named return value optimization" (`NRVO`:idx:). NRVO means that the stores
+to ``result`` inside ``p`` directly affect the destination ``dest``
+in ``let/var dest = p(args)`` (definition of ``dest``) and also in ``dest = p(args)``
+(assignment to ``dest``). This is achieved by rewriting ``dest = p(args)``
+to ``p'(args, dest)`` where ``p'`` is a variation of ``p`` that returns ``void`` and
+receives a hidden mutable parameter representing ``result``.
+
+Informally:
+
+.. code-block:: nim
+  proc p(): BigT = ...
+
+  var x = p()
+  x = p()
+
+  # is roughly turned into:
+
+  proc p(result: var BigT) = ...
+
+  var x; p(x)
+  p(x)
+
+
+Let ``T``'s be ``p``'s return type. NRVO applies for ``T``
+if ``sizeof(T) >= N`` (where ``N`` is implementation dependent),
+in other words, it applies for "big" structures.
+
+If ``p`` can raise an exception, NRVO applies regardless. This can produce
+observable differences in behavior:
+
+.. code-block:: nim
+
+  type
+    BigT = array[16, int]
+
+  proc p(raiseAt: int): BigT =
+    for i in 0..high(result):
+      if i == raiseAt: raise newException(ValueError, "interception")
+      result[i] = i
+
+  proc main =
+    var x: BigT
+    try:
+      x = p(8)
+    except ValueError:
+      doAssert x == [0, 1, 2, 3, 4, 5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0]
+
+  main()
+
+
+However, the current implementation produces a warning in these cases.
+There are different ways to deal with this warning:
+
+1. Disable the warning via ``{.push warning[ObservableStores]: off.}`` ... ``{.pop.}``.
+   Then one may need to ensure that ``p`` only raises *before* any stores to ``result``
+   happen.
+
+2. One can use a temporary helper variable, for example instead of ``x = p(8)``
+   use ``let tmp = p(8); x = tmp``.
+
 
 Overloading of the subscript operator
 -------------------------------------
@@ -3831,7 +3910,7 @@ as there are components in the tuple. The i'th iteration variable's type is
 the type of the i'th component. In other words, implicit tuple unpacking in a
 for loop context is supported.
 
-Implict items/pairs invocations
+Implicit items/pairs invocations
 -------------------------------
 
 If the for loop expression ``e`` does not denote an iterator and the for loop
@@ -4225,7 +4304,7 @@ Exception hierarchy
 The exception tree is defined in the `system <system.html>`_ module.
 Every exception inherits from ``system.Exception``. Exceptions that indicate
 programming bugs inherit from ``system.Defect`` (which is a subtype of ``Exception``)
-and are stricly speaking not catchable as they can also be mapped to an operation
+and are strictly speaking not catchable as they can also be mapped to an operation
 that terminates the whole process. If panics are turned into exceptions, these
 exceptions inherit from `Defect`.
 
@@ -4241,17 +4320,42 @@ It is possible to raise/catch imported C++ exceptions. Types imported using
 caught by reference. Example:
 
 .. code-block:: nim
+    :test: "nim cpp -r $1"
 
   type
-    std_exception {.importcpp: "std::exception", header: "<exception>".} = object
+    CStdException {.importcpp: "std::exception", header: "<exception>", inheritable.} = object
+      ## does not inherit from `RootObj`, so we use `inheritable` instead
+    CRuntimeError {.requiresInit, importcpp: "std::runtime_error", header: "<stdexcept>".} = object of CStdException
+      ## `CRuntimeError` has no default constructor => `requiresInit`
+  proc what(s: CStdException): cstring {.importcpp: "((char *)#.what())".}
+  proc initRuntimeError(a: cstring): CRuntimeError {.importcpp: "std::runtime_error(@)", constructor.}
+  proc initStdException(): CStdException {.importcpp: "std::exception()", constructor.}
 
-  proc what(s: std_exception): cstring {.importcpp: "((char *)#.what())".}
+  proc fn() =
+    let a = initRuntimeError("foo")
+    doAssert $a.what == "foo"
+    var b: cstring
+    try: raise initRuntimeError("foo2")
+    except CStdException as e:
+      doAssert e is CStdException
+      b = e.what()
+    doAssert $b == "foo2"
 
-  try:
-    raise std_exception()
-  except std_exception as ex:
-    echo ex.what()
+    try: raise initStdException()
+    except CStdException: discard
 
+    try: raise initRuntimeError("foo3")
+    except CRuntimeError as e:
+      b = e.what()
+    except CStdException:
+      doAssert false
+    doAssert $b == "foo3"
+
+  fn()
+
+**Note:** `getCurrentException()` and `getCurrentExceptionMsg()` are not available
+for imported exceptions. One needs to use the `except ImportedException as x:` syntax
+and rely on functionality of the `x` object to get exception details.
 
 
 Effect system
@@ -4337,6 +4441,28 @@ Rules 1-2 ensure the following works:
 
 So in many cases a callback does not cause the compiler to be overly
 conservative in its effect analysis.
+
+Exceptions inheriting from ``system.Defect`` are not tracked with
+the ``.raises: []`` exception tracking mechanism. This is more consistent with the
+built-in operations. The following code is valid::
+
+.. code-block:: nim
+
+  proc mydiv(a, b): int {.raises: [].} =
+    a div b # can raise an DivByZeroDefect
+
+And so is::
+
+.. code-block:: nim
+
+  proc mydiv(a, b): int {.raises: [].} =
+    if b == 0: raise newException(DivByZeroDefect, "division by zero")
+    else: result = a div b
+
+
+The reason for this is that ``DivByZeroDefect`` inherits from ``Defect`` and
+with ``--panics:on`` Defects become unrecoverable errors.
+(Since version 1.4 of the language.)
 
 
 Tag tracking
@@ -4514,8 +4640,8 @@ more complex type classes:
 
 Whilst the syntax of type classes appears to resemble that of ADTs/algebraic data
 types in ML-like languages, it should be understood that type classes are static
-constraints to be enforced at type instantations. Type classes are not really
-types in themsleves, but are instead a system of providing generic "checks" that
+constraints to be enforced at type instantiations. Type classes are not really
+types in themselves, but are instead a system of providing generic "checks" that
 ultimately *resolve* to some singular type. Type classes do not allow for
 runtime type dynamism, unlike object variants or methods.
 
@@ -4677,7 +4803,7 @@ instantiation. The following is not allowed:
   # not valid: 'T' is not inferred to be of type 'var int'
   g(v, i)
 
-  # also not allowed: explict instantiation via 'var int'
+  # also not allowed: explicit instantiation via 'var int'
   g[var int](v, i)
 
 
@@ -4833,7 +4959,7 @@ compiler. Explicit immediate templates are now deprecated.
 Passing a code block to a template
 ----------------------------------
 
-You can pass a block of statements as the last argument to a template
+One can pass a block of statements as the last argument to a template
 following the special ``:`` syntax:
 
 .. code-block:: nim
@@ -5167,7 +5293,7 @@ tree (AST) of the code that is passed to it. The macro can then do
 transformations on it and return the transformed AST. This can be used to
 add custom language features and implement `domain specific languages`:idx:.
 
-Macro invocation is a case where semantic analyis does **not** entirely proceed
+Macro invocation is a case where semantic analysis does **not** entirely proceed
 top to bottom and left to right. Instead, semantic analysis happens at least
 twice:
 
@@ -5373,7 +5499,7 @@ generic type ``static[T]``. The type param can be omitted to obtain the type
 class of all constant expressions. A more specific type class can be created by
 instantiating ``static`` with another type class.
 
-You can force an expression to be evaluated at compile time as a constant
+One can force an expression to be evaluated at compile time as a constant
 expression by coercing it to a corresponding ``static`` type:
 
 .. code-block:: nim
@@ -5387,14 +5513,14 @@ possible type mismatch error.
 typedesc[T]
 -----------
 
-In many contexts, Nim allows you to treat the names of types as regular
+In many contexts, Nim allows to treat the names of types as regular
 values. These values exists only during the compilation phase, but since
 all values must have a type, ``typedesc`` is considered their special type.
 
 ``typedesc`` acts like a generic type. For instance, the type of the symbol
 ``int`` is ``typedesc[int]``. Just like with regular generic types, when the
 generic param is omitted, ``typedesc`` denotes the type class of all types.
-As a syntactic convenience, you can also use ``typedesc`` as a modifier.
+As a syntactic convenience, one can also use ``typedesc`` as a modifier.
 
 Procs featuring ``typedesc`` params are considered implicitly generic.
 They will be instantiated for each unique combination of supplied types
@@ -5472,7 +5598,7 @@ typeof operator
 **Note**: ``typeof(x)`` can for historical reasons also be written as
 ``type(x)`` but ``type(x)`` is discouraged.
 
-You can obtain the type of a given expression by constructing a ``typeof``
+One can obtain the type of a given expression by constructing a ``typeof``
 value from it (in many other languages this is known as the `typeof`:idx:
 operator):
 
@@ -5699,9 +5825,9 @@ modules don't need to import a module's dependencies:
   echo $x
 
 When the exported symbol is another module, all of its definitions will
-be forwarded. You can use an ``except`` list to exclude some of the symbols.
+be forwarded. One can use an ``except`` list to exclude some of the symbols.
 
-Notice that when exporting, you need to specify only the module name:
+Notice that when exporting, one needs to specify only the module name:
 
 .. code-block:: nim
   import foo/bar/baz
@@ -6400,7 +6526,7 @@ and instead the generated code should contain an ``#include``:
     PFile {.importc: "FILE*", header: "<stdio.h>".} = distinct pointer
       # import C's FILE* type; Nim will treat it as a new pointer type
 
-The ``header`` pragma always expects a string constant. The string contant
+The ``header`` pragma always expects a string constant. The string constant
 contains the header file: As usual for C, a system header file is enclosed
 in angle brackets: ``<>``. If no angle brackets are given, Nim
 encloses the header file in ``""`` in the generated C code.
@@ -6428,7 +6554,7 @@ with the project:
   {.compile: "myfile.cpp".}
 
 **Note**: Nim computes a SHA1 checksum and only recompiles the file if it
-has changed. You can use the ``-f`` command line option to force recompilation
+has changed. One can use the ``-f`` command line option to force recompilation
 of the file.
 
 
@@ -6443,12 +6569,12 @@ The ``link`` pragma can be used to link an additional file with the project:
 PassC pragma
 ------------
 The ``passc`` pragma can be used to pass additional parameters to the C
-compiler like you would using the commandline switch ``--passc``:
+compiler like one would using the commandline switch ``--passc``:
 
 .. code-block:: Nim
   {.passc: "-Wall -Werror".}
 
-Note that you can use ``gorge`` from the `system module <system.html>`_ to
+Note that one can use ``gorge`` from the `system module <system.html>`_ to
 embed parameters from an external command that will be executed
 during semantic analysis:
 
@@ -6471,12 +6597,12 @@ the pragma resides in:
 PassL pragma
 ------------
 The ``passL`` pragma can be used to pass additional parameters to the linker
-like you would using the commandline switch ``--passL``:
+like one would using the commandline switch ``--passL``:
 
 .. code-block:: Nim
   {.passL: "-lSDLmain -lSDL".}
 
-Note that you can use ``gorge`` from the `system module <system.html>`_ to
+Note that one can use ``gorge`` from the `system module <system.html>`_ to
 embed parameters from an external command that will be executed
 during semantic analysis:
 
@@ -6731,7 +6857,7 @@ Importcpp for objects
 ~~~~~~~~~~~~~~~~~~~~~
 
 Generic ``importcpp``'ed objects are mapped to C++ templates. This means that
-you can import C++'s templates rather easily without the need for a pattern
+one can import C++'s templates rather easily without the need for a pattern
 language for object types:
 
 .. code-block:: nim
@@ -6773,7 +6899,7 @@ Produces:
 ImportJs pragma
 ---------------
 
-Similar to the `importcpp pragma for C++ <#foreign-function-interface-importc-pragma>`_,
+Similar to the `importcpp pragma for C++ <#implementation-specific-pragmas-importcpp-pragma>`_,
 the ``importjs`` pragma can be used to import Javascript methods or
 symbols in general. The generated code then uses the Javascript method
 calling syntax: ``obj.method(arg)``.
@@ -6980,9 +7106,9 @@ specified. It is possible to annotate procs, templates, type and variable
 definitions, statements, etc.
 
 Macros module includes helpers which can be used to simplify custom pragma
-access `hasCustomPragma`, `getCustomPragmaVal`. Please consult macros module
-documentation for details. These macros are no magic, they don't do anything
-you cannot do yourself by walking AST object representation.
+access `hasCustomPragma`, `getCustomPragmaVal`. Please consult the macros module
+documentation for details. These macros are not magic, everything they do can
+also be achieved by walking the AST of the object representation.
 
 More examples with custom pragmas:
 
@@ -7066,6 +7192,16 @@ spelled*:
 
 .. code-block::
   proc printf(formatstr: cstring) {.header: "<stdio.h>", importc: "printf", varargs.}
+
+When ``importc`` is applied to a ``let`` statement it can omit its value which
+will then be expected to come from C. This can be used to import a C ``const``:
+
+.. code-block::
+  {.emit: "const int cconst = 42;".}
+
+  let cconst {.importc, nodecl.}: cint
+
+  assert cconst == 42
 
 Note that this pragma has been abused in the past to also work in the
 js backend for js objects and functions. : Other backends do provide

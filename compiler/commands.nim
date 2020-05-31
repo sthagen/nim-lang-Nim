@@ -434,11 +434,18 @@ proc processSwitch*(switch, arg: string, pass: TCmdLinePass, info: TLineInfo;
   of "outdir":
     expectArg(conf, switch, arg, pass, info)
     conf.outDir = processPath(conf, arg, info, notRelativeToProj=true)
+  of "usenimcache":
+    processOnOffSwitchG(conf, {optUseNimcache}, arg, pass, info)
   of "docseesrcurl":
     expectArg(conf, switch, arg, pass, info)
     conf.docSeeSrcUrl = arg
   of "docroot":
-    conf.docRoot = if arg.len == 0: "@default" else: arg
+    conf.docRoot = if arg.len == 0: docRootDefault else: arg
+  of "backend", "b":
+    let backend = parseEnum(arg.normalize, TBackend.default)
+    if backend == TBackend.default: localError(conf, info, "invalid backend: '$1'" % arg)
+    conf.backend = backend
+  of "doccmd": conf.docCmd = arg
   of "mainmodule", "m":
     discard "allow for backwards compatibility, but don't do anything"
   of "define", "d":
@@ -478,7 +485,7 @@ proc processSwitch*(switch, arg: string, pass: TCmdLinePass, info: TLineInfo;
   of "forcebuild", "f":
     processOnOffSwitchG(conf, {optForceFullMake}, arg, pass, info)
   of "project":
-    processOnOffSwitchG(conf, {optWholeProject}, arg, pass, info)
+    processOnOffSwitchG(conf, {optWholeProject, optGenIndex}, arg, pass, info)
   of "gc":
     expectArg(conf, switch, arg, pass, info)
     if pass in {passCmd2, passPP}:
@@ -486,6 +493,7 @@ proc processSwitch*(switch, arg: string, pass: TCmdLinePass, info: TLineInfo;
       of "boehm":
         conf.selectedGC = gcBoehm
         defineSymbol(conf.symbols, "boehmgc")
+        incl conf.globalOptions, optTlsEmulation # Boehm GC doesn't scan the real TLS
       of "refc":
         conf.selectedGC = gcRefc
       of "v2":
@@ -495,8 +503,6 @@ proc processSwitch*(switch, arg: string, pass: TCmdLinePass, info: TLineInfo;
         defineSymbol(conf.symbols, "gcmarkandsweep")
       of "destructors", "arc":
         conf.selectedGC = gcArc
-        if conf.cmd != cmdCompileToCpp:
-          conf.exc = excGoto
         defineSymbol(conf.symbols, "gcdestructors")
         defineSymbol(conf.symbols, "gcarc")
         incl conf.globalOptions, optSeqDestructors
@@ -506,8 +512,6 @@ proc processSwitch*(switch, arg: string, pass: TCmdLinePass, info: TLineInfo;
           defineSymbol(conf.symbols, "nimV2")
       of "orc":
         conf.selectedGC = gcOrc
-        if conf.cmd != cmdCompileToCpp:
-          conf.exc = excGoto
         defineSymbol(conf.symbols, "gcdestructors")
         defineSymbol(conf.symbols, "gcorc")
         incl conf.globalOptions, optSeqDestructors

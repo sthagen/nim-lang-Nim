@@ -1,15 +1,14 @@
 ## Part of 'koch' responsible for the documentation generation.
 
 import os, strutils, osproc, sets, pathnorm
+import "../compiler/nimpaths"
 
 const
   gaCode* = " --doc.googleAnalytics:UA-48159761-1"
-  # --warning[LockLevel]:off pending #13218
-  nimArgs = "--warning[LockLevel]:off --hint[Conf]:off --hint[Path]:off --hint[Processing]:off -d:boot --putenv:nimversion=$#" % system.NimVersion
+  nimArgs = "--hint:Conf:off --hint:Path:off --hint:Processing:off -d:boot --putenv:nimversion=$#" % system.NimVersion
   gitUrl = "https://github.com/nim-lang/Nim"
   docHtmlOutput = "doc/html"
   webUploadOutput = "web/upload"
-  docHackDir = "tools/dochack"
 
 var nimExe*: string
 
@@ -231,6 +230,15 @@ proc buildDocSamples(nimArgs, destPath: string) =
   exec(findNim().quoteShell() & " doc $# -o:$# $#" %
     [nimArgs, destPath / "docgen_sample.html", "doc" / "docgen_sample.nim"])
 
+proc buildDocPackages(nimArgs, destPath: string) =
+  # compiler docs, and later, other packages (perhaps tools, testament etc)
+  let nim = findNim().quoteShell()
+  let extra = "-u:boot"
+    # to avoid broken links to manual from compiler dir, but a multi-package
+    # structure could be supported later
+  exec("$1 doc --project --outdir:$2/compiler $3 --git.url:$4 $5 compiler/nim.nim" %
+    [nim, destPath, nimArgs, gitUrl, extra])
+
 proc buildDoc(nimArgs, destPath: string) =
   # call nim for the documentation:
   var
@@ -249,8 +257,7 @@ proc buildDoc(nimArgs, destPath: string) =
     i.inc
   for d in items(doc):
     var nimArgs2 = nimArgs
-    if d.isRelativeTo("compiler"):
-      nimArgs2.add " --docroot"
+    if d.isRelativeTo("compiler"): doAssert false
     commands[i] = nim & " doc $# --git.url:$# --outdir:$# --index:on $#" %
       [nimArgs2, gitUrl, destPath, d]
     i.inc
@@ -262,6 +269,11 @@ proc buildDoc(nimArgs, destPath: string) =
 
   mexec(commands)
   exec(nim & " buildIndex -o:$1/theindex.html $1" % [destPath])
+    # caveat: this works so long it's called before `buildDocPackages` which
+    # populates `compiler/` with unrelated idx files that shouldn't be in index,
+    # so should work in CI but you may need to remove your generated html files
+    # locally after calling `./koch docs`. The clean fix would be for `idx` files
+    # to be transient with `--project` (eg all in memory).
 
 proc buildPdfDoc*(nimArgs, destPath: string) =
   createDir(destPath)
@@ -289,29 +301,22 @@ proc buildPdfDoc*(nimArgs, destPath: string) =
       removeFile(changeFileExt(pdf, "out"))
       removeFile(changeFileExt(d, "tex"))
 
-proc buildJS() =
-  exec(findNim().quoteShell() & " js -d:release --out:$1 tools/nimblepkglist.nim" %
+proc buildJS(): string =
+  let nim = findNim()
+  exec(nim.quoteShell() & " js -d:release --out:$1 tools/nimblepkglist.nim" %
       [webUploadOutput / "nimblepkglist.js"])
-  exec(findNim().quoteShell() & " js " & (docHackDir / "dochack.nim"))
+  result = getDocHacksJs(nimr = getCurrentDir(), nim)
 
 proc buildDocs*(args: string) =
-  const
-    docHackJs = "dochack.js"
-  let
-    a = nimArgs & " " & args
-    docHackJsSource = docHackDir / docHackJs
-    docHackJsDest = docHtmlOutput / docHackJs
+  let docHackJsSource = buildJS()
+  template fn(args, dir) =
+    let dir2 = dir
+    let args2 = args
+    createDir(dir2)
+    buildDocSamples(args2, dir2)
+    buildDoc(args2, dir2)
+    buildDocPackages(args2, dir2)
+    copyFile(docHackJsSource, dir2 / docHackJsSource.lastPathPart)
 
-  buildJS()                     # This call generates docHackJsSource
-  let docup = webUploadOutput / NimVersion
-  createDir(docup)
-  buildDocSamples(a, docup)
-  buildDoc(a, docup)
-
-  # 'nimArgs' instead of 'a' is correct here because we don't want
-  # that the offline docs contain the 'gaCode'!
-  createDir(docHtmlOutput)
-  buildDocSamples(nimArgs, docHtmlOutput)
-  buildDoc(nimArgs, docHtmlOutput)
-  copyFile(docHackJsSource, docHackJsDest)
-  copyFile(docHackJsSource, docup / docHackJs)
+  fn(nimArgs & " " & args, webUploadOutput / NimVersion)
+  fn(nimArgs, docHtmlOutput) # no `args` to avoid offline docs containing the 'gaCode'!
