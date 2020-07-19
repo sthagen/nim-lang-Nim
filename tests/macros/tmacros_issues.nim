@@ -19,6 +19,8 @@ nil
 42
 false
 true
+@[i0, i1, i2, i3, i4]
+@[tmp, tmp, tmp, tmp, tmp]
 '''
 
   output: '''
@@ -27,6 +29,12 @@ array[0 .. 100, int]
 10
 test
 0o377'i8
+1
+2
+3
+foo1
+foo2
+foo3
 '''
 """
 
@@ -244,3 +252,40 @@ macro toRendererBug(n): untyped =
   result = newLit repr(n)
 
 echo toRendererBug(0o377'i8)
+
+# bug #12129
+macro foobar() =
+  var loopVars = newSeq[NimNode](5)
+  for i, sym in loopVars.mpairs():
+    sym = ident("i" & $i)
+  echo loopVars
+  for sym in loopVars.mitems():
+    sym = ident("tmp")
+  echo loopVars
+
+foobar()
+
+
+# bug #13253
+import macros
+
+type
+  FooBar = object
+    a: seq[int]
+
+macro genFoobar(a: static FooBar): untyped =
+  result = newStmtList()
+  for b in a.a:
+    result.add(newCall(bindSym"echo", newLit b))
+
+proc foobar(a: static FooBar) =
+  genFoobar(a)  # removing this make it work
+  for b in a.a:
+    echo "foo" & $b
+
+proc main() =
+  const a: seq[int] = @[1, 2,3]
+  # Error: type mismatch: got <array[0..2, int]> but expected 'seq[int]'
+  const fb = Foobar(a: a)
+  foobar(fb)
+main()

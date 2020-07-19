@@ -126,9 +126,8 @@ proc genRawSetData(cs: TBitSet, size: int): Rope =
     result = intLiteral(cast[BiggestInt](bitSetToWord(cs, size)))
 
 proc genSetNode(p: BProc, n: PNode): Rope =
-  var cs: TBitSet
   var size = int(getSize(p.config, n.typ))
-  toBitSet(p.config, n, cs)
+  let cs = toBitSet(p.config, n)
   if size > 8:
     let id = nodeTableTestOrSet(p.module.dataCache, n, p.module.labels)
     result = p.module.tmpBase & rope(id)
@@ -141,6 +140,7 @@ proc genSetNode(p: BProc, n: PNode): Rope =
     result = genRawSetData(cs, size)
 
 proc getStorageLoc(n: PNode): TStorageLoc =
+  ## deadcode
   case n.kind
   of nkSym:
     case n.sym.kind
@@ -675,7 +675,7 @@ proc unaryArith(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
 
 proc isCppRef(p: BProc; typ: PType): bool {.inline.} =
   result = p.module.compileToCpp and
-      skipTypes(typ, abstractInstOwned).kind == tyVar and
+      skipTypes(typ, abstractInstOwned).kind in {tyVar} and
       tfVarIsPtr notin skipTypes(typ, abstractInstOwned).flags
 
 proc genDeref(p: BProc, e: PNode, d: var TLoc) =
@@ -692,7 +692,7 @@ proc genDeref(p: BProc, e: PNode, d: var TLoc) =
     if typ.kind in {tyUserTypeClass, tyUserTypeClassInst} and typ.isResolvedUserTypeClass:
       typ = typ.lastSon
     typ = typ.skipTypes(abstractInstOwned)
-    if typ.kind == tyVar and tfVarIsPtr notin typ.flags and p.module.compileToCpp and e[0].kind == nkHiddenAddr:
+    if typ.kind in {tyVar} and tfVarIsPtr notin typ.flags and p.module.compileToCpp and e[0].kind == nkHiddenAddr:
       initLocExprSingleUse(p, e[0][0], d)
       return
     else:
@@ -715,7 +715,7 @@ proc genDeref(p: BProc, e: PNode, d: var TLoc) =
       else:
         internalError(p.config, e.info, "genDeref " & $typ.kind)
     elif p.module.compileToCpp:
-      if typ.kind == tyVar and tfVarIsPtr notin typ.flags and
+      if typ.kind in {tyVar} and tfVarIsPtr notin typ.flags and
            e.kind == nkHiddenDeref:
         putIntoDest(p, d, e, rdLoc(a), a.storage)
         return
@@ -930,7 +930,7 @@ proc genSeqElem(p: BProc, n, x, y: PNode, d: var TLoc) =
   if ty.kind in {tyRef, tyPtr}:
     ty = skipTypes(ty.lastSon, abstractVarRange) # emit range check:
   if optBoundsCheck in p.options:
-    if ty.kind == tyString and (not defined(nimNoZeroTerminator) or optLaxStrings in p.options):
+    if ty.kind == tyString and not defined(nimNoZeroTerminator):
       linefmt(p, cpsStmts,
               "if ((NU)($1) > (NU)$2){ #raiseIndexError2($1,$2); $3}$n",
               [rdLoc(b), lenExpr(p, a), raiseInstr(p)])
@@ -2066,10 +2066,14 @@ proc skipAddr(n: PNode): PNode =
 
 proc genWasMoved(p: BProc; n: PNode) =
   var a: TLoc
-  initLocExpr(p, n[1].skipAddr, a)
-  resetLoc(p, a)
-  #linefmt(p, cpsStmts, "#nimZeroMem((void*)$1, sizeof($2));$n",
-  #  [addrLoc(p.config, a), getTypeDesc(p.module, a.t)])
+  let n1 = n[1].skipAddr
+  if p.withinBlockLeaveActions > 0 and notYetAlive(n1):
+    discard
+  else:
+    initLocExpr(p, n1, a)
+    resetLoc(p, a)
+    #linefmt(p, cpsStmts, "#nimZeroMem((void*)$1, sizeof($2));$n",
+    #  [addrLoc(p.config, a), getTypeDesc(p.module, a.t)])
 
 proc genMove(p: BProc; n: PNode; d: var TLoc) =
   var a: TLoc
@@ -2096,14 +2100,14 @@ proc genDestroy(p: BProc; n: PNode) =
       initLocExpr(p, arg, a)
       linefmt(p, cpsStmts, "if ($1.p && !($1.p->cap & NIM_STRLIT_FLAG)) {$n" &
         " #deallocShared($1.p);$n" &
-        " $1.p = NIM_NIL; $1.len = 0; }$n",
+        "}$n",
         [rdLoc(a)])
     of tySequence:
       var a: TLoc
       initLocExpr(p, arg, a)
       linefmt(p, cpsStmts, "if ($1.p && !($1.p->cap & NIM_STRLIT_FLAG)) {$n" &
         " #deallocShared($1.p);$n" &
-        " $1.p = NIM_NIL; $1.len = 0; }$n",
+        "}$n",
         [rdLoc(a), getTypeDesc(p.module, t.lastSon)])
     else: discard "nothing to do"
   else:
@@ -2593,10 +2597,12 @@ proc expr(p: BProc, n: PNode, d: var TLoc) =
       else:
         putLocIntoDest(p, d, sym.loc)
     of skTemp:
-      if sym.loc.r == nil:
-        # we now support undeclared 'skTemp' variables for easier
-        # transformations in other parts of the compiler:
-        assignLocalVar(p, n)
+      when false:
+        # this is more harmful than helpful.
+        if sym.loc.r == nil:
+          # we now support undeclared 'skTemp' variables for easier
+          # transformations in other parts of the compiler:
+          assignLocalVar(p, n)
       if sym.loc.r == nil or sym.loc.t == nil:
         #echo "FAILED FOR PRCO ", p.prc.name.s
         #echo renderTree(p.prc.ast, {renderIds})
@@ -2959,8 +2965,7 @@ proc genBracedInit(p: BProc, n: PNode; isConst: bool): Rope =
       ty = skipTypes(n.typ, abstractInstOwned + {tyStatic}).kind
     case ty
     of tySet:
-      var cs: TBitSet
-      toBitSet(p.config, n, cs)
+      let cs = toBitSet(p.config, n)
       result = genRawSetData(cs, int(getSize(p.config, n.typ)))
     of tySequence:
       if optSeqDestructors in p.config.globalOptions:

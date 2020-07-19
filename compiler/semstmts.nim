@@ -229,8 +229,8 @@ proc semTry(c: PContext, n: PNode; flags: TExprFlags): PNode =
         a[0][2] = newSymNode(symbol, a[0][2].info)
 
       elif a.len == 1:
-          # count number of ``except: body`` blocks
-          inc catchAllExcepts
+        # count number of ``except: body`` blocks
+        inc catchAllExcepts
 
       else:
         # support ``except KeyError, ValueError, ... : body``
@@ -514,8 +514,7 @@ proc semVarOrLet(c: PContext, n: PNode, symkind: TSymKind): PNode =
         if typ.kind in tyUserTypeClasses and typ.isResolvedUserTypeClass:
           typ = typ.lastSon
         if hasEmpty(typ):
-          localError(c.config, def.info, errCannotInferTypeOfTheLiteral %
-                     ($typ.kind).substr(2).toLowerAscii)
+          localError(c.config, def.info, errCannotInferTypeOfTheLiteral % typ.kind.toHumanStr)
         elif typ.kind == tyProc and tfUnresolved in typ.flags:
           localError(c.config, def.info, errProcHasNoConcreteType % def.renderTree)
         when false:
@@ -587,23 +586,19 @@ proc semVarOrLet(c: PContext, n: PNode, symkind: TSymKind): PNode =
         b.add a[^2]
         b.add copyTree(def)
         addToVarSection(c, result, n, b)
-        if optOldAst in c.config.options:
-          if def.kind != nkEmpty:
-            v.ast = def
+        # this is needed for the evaluation pass, guard checking
+        #  and custom pragmas:
+        var ast = newNodeI(nkIdentDefs, a.info)
+        if a[j].kind == nkPragmaExpr:
+          var p = newNodeI(nkPragmaExpr, a.info)
+          p.add newSymNode(v)
+          p.add a[j][1].copyTree
+          ast.add p
         else:
-          # this is needed for the evaluation pass, guard checking
-          #  and custom pragmas:
-          var ast = newNodeI(nkIdentDefs, a.info)
-          if a[j].kind == nkPragmaExpr:
-            var p = newNodeI(nkPragmaExpr, a.info)
-            p.add newSymNode(v)
-            p.add a[j][1].copyTree
-            ast.add p
-          else:
-            ast.add newSymNode(v)
-          ast.add a[^2].copyTree
-          ast.add def
-          v.ast = ast
+          ast.add newSymNode(v)
+        ast.add a[^2].copyTree
+        ast.add def
+        v.ast = ast
       else:
         if def.kind in {nkPar, nkTupleConstr}: v.ast = def[j]
         # bug #7663, for 'nim check' this can be a non-tuple:
@@ -732,13 +727,8 @@ proc semForVars(c: PContext, n: PNode; flags: TExprFlags): PNode =
           var v = symForVar(c, n[0][i])
           if getCurrOwner(c).kind == skModule: incl(v.flags, sfGlobal)
           case iter.kind
-          of tyVar:
-            v.typ = newTypeS(tyVar, c)
-            v.typ.add iterAfterVarLent[i]
-            if tfVarIsPtr in iter.flags:
-              v.typ.flags.incl tfVarIsPtr
-          of tyLent:
-            v.typ = newTypeS(tyLent, c)
+          of tyVar, tyLent:
+            v.typ = newTypeS(iter.kind, c)
             v.typ.add iterAfterVarLent[i]
             if tfVarIsPtr in iter.flags:
               v.typ.flags.incl tfVarIsPtr
@@ -795,13 +785,8 @@ proc semForVars(c: PContext, n: PNode; flags: TExprFlags): PNode =
         var v = symForVar(c, n[i])
         if getCurrOwner(c).kind == skModule: incl(v.flags, sfGlobal)
         case iter.kind
-        of tyVar:
-          v.typ = newTypeS(tyVar, c)
-          v.typ.add iterAfterVarLent[i]
-          if tfVarIsPtr in iter.flags:
-            v.typ.flags.incl tfVarIsPtr
-        of tyLent:
-          v.typ = newTypeS(tyLent, c)
+        of tyVar, tyLent:
+          v.typ = newTypeS(iter.kind, c)
           v.typ.add iterAfterVarLent[i]
           if tfVarIsPtr in iter.flags:
             v.typ.flags.incl tfVarIsPtr
@@ -2280,10 +2265,8 @@ proc semStmtList(c: PContext, n: PNode, flags: TExprFlags): PNode =
         sfNoReturn in n[i][0].sym.flags:
       for j in i + 1..<n.len:
         case n[j].kind
-        of nkPragma, nkCommentStmt, nkNilLit, nkEmpty, nkBlockExpr,
-            nkBlockStmt, nkState: discard
-        else: localError(c.config, n[j].info,
-          "unreachable statement after 'return' statement or '{.noReturn.}' proc")
+        of nkPragma, nkCommentStmt, nkNilLit, nkEmpty, nkState: discard
+        else: message(c.config, n[j].info, warnUnreachableCode)
     else: discard
 
   if result.len == 1 and

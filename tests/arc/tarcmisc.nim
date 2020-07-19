@@ -3,6 +3,11 @@ discard """
 123xyzabc
 destroyed: false
 destroyed: false
+destroyed2: false
+destroyed2: false
+destroying variable: 2
+destroying variable: 1
+whiley ends :(
 1
 (x: "0")
 (x: "1")
@@ -15,8 +20,12 @@ destroyed: false
 (x: "8")
 (x: "9")
 (x: "10")
+0
+new line before - @['a']
+new line after - @['a']
 closed
-destroying variable
+destroying variable: 20
+destroying variable: 10
 '''
   cmd: "nim c --gc:arc $file"
 """
@@ -39,11 +48,12 @@ type Variable = ref object
   value: int
 
 proc `=destroy`(self: var typeof(Variable()[])) =
-  echo "destroying variable"
+  echo "destroying variable: ",self.value
 
 proc newVariable(value: int): Variable =
   result = Variable()
   result.value = value
+  #echo "creating variable: ",result.value
 
 proc test(count: int) =
   var v {.global.} = newVariable(10)
@@ -56,6 +66,28 @@ proc test(count: int) =
 
 test(3)
 
+proc test2(count: int) =
+  #block: #XXX: Fails with block currently
+    var v {.global.} = newVariable(20)
+
+    var count = count - 1
+    if count == 0: return
+
+    test2(count)
+    echo "destroyed2: ", v.isNil
+
+test2(3)
+
+proc whiley =
+  var a = newVariable(1)
+  while true:
+    var b = newVariable(2)
+    if true: raise newException(CatchableError, "test")
+
+try:
+  whiley()
+except CatchableError:
+  echo "whiley ends :("
 
 #------------------------------------------------------------------------------
 # issue #13810
@@ -173,3 +205,55 @@ proc bug14495 =
     echo o[]
 
 bug14495()
+
+# bug #14396
+type
+  Spinny = ref object
+    t: ref int
+    text: string
+
+proc newSpinny*(): Spinny =
+  Spinny(t: new(int), text: "hello")
+
+proc spinnyLoop(x: ref int, spinny: sink Spinny) =
+  echo x[]
+
+proc start*(spinny: sink Spinny) =
+  spinnyLoop(spinny.t, spinny)
+
+var spinner1 = newSpinny()
+spinner1.start()
+
+# bug #14345
+
+type
+  SimpleLoopB = ref object
+    children: seq[SimpleLoopB]
+    parent: SimpleLoopB
+
+proc addChildLoop(self: SimpleLoopB, loop: SimpleLoopB) =
+  self.children.add loop
+
+proc setParent(self: SimpleLoopB, parent: SimpleLoopB) =
+  self.parent = parent
+  self.parent.addChildLoop(self)
+
+var l = SimpleLoopB()
+l.setParent(l)
+
+
+# bug #14968
+import times
+let currentTime = now().utc
+
+
+# bug #14994
+import sequtils
+var newLine = @['a']
+let indent = newSeq[char]()
+
+echo "new line before - ", newline
+
+newline.insert(indent, 0)
+
+echo "new line after - ", newline

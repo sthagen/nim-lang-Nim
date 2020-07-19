@@ -8,7 +8,7 @@
 #
 
 when defined(js):
-  {.error: "This library needs to be compiled with a c-like backend, and depends on PCRE.".}
+  {.error: "This library needs to be compiled with a c-like backend, and depends on PCRE; See jsre for JS backend.".}
 
 ## Regular expression support for Nim.
 ##
@@ -482,13 +482,6 @@ proc multiReplace*(s: string, subs: openArray[
       inc(i)
   # copy the rest:
   add(result, substr(s, i))
-
-proc parallelReplace*(s: string, subs: openArray[
-  tuple[pattern: Regex, repl: string]]): string {.deprecated:
-  "Deprecated since v0.18.0: Use ``multiReplace`` instead.".} =
-  ## Returns a modified copy of ``s`` with the substitutions in ``subs``
-  ## applied in parallel.
-  result = multiReplace(s, subs)
 
 proc transformFile*(infile, outfile: string,
                     subs: openArray[tuple[pattern: Regex, repl: string]]) =

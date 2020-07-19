@@ -134,7 +134,7 @@ proc expectReply(ftp: AsyncFtpClient): Future[TaintedString] {.async.} =
   var line = await ftp.csock.recvLine()
   result = TaintedString(line)
   var count = 0
-  while line[3] == '-':
+  while line.len > 3 and line[3] == '-':
     ## Multi-line reply.
     line = await ftp.csock.recvLine()
     string(result).add("\n" & line)
@@ -231,7 +231,7 @@ proc listDirs*(ftp: AsyncFtpClient, dir = ""): Future[seq[string]] {.async.} =
 
   result = splitLines(await ftp.getLines())
 
-proc existsFile*(ftp: AsyncFtpClient, file: string): Future[bool] {.async.} =
+proc fileExists*(ftp: AsyncFtpClient, file: string): Future[bool] {.async.} =
   ## Determines whether ``file`` exists.
   var files = await ftp.listDirs()
   for f in items(files):

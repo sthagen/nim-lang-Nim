@@ -98,7 +98,7 @@ proc writeVersionInfo(conf: ConfigRef; pass: TCmdLinePass) =
                                  CPU[conf.target.hostCPU].name, CompileDate]),
                {msgStdout})
 
-    const gitHash = gorge("git log -n 1 --format=%H").strip
+    const gitHash {.strdefine.} = gorge("git log -n 1 --format=%H").strip
     when gitHash.len == 40:
       msgWriteln(conf, "git hash: " & gitHash, {msgStdout})
 
@@ -320,7 +320,6 @@ proc testCompileOption*(conf: ConfigRef; switch: string, info: TLineInfo): bool 
   of "patterns", "trmacros": result = contains(conf.options, optTrMacros)
   of "excessivestacktrace": result = contains(conf.globalOptions, optExcessiveStackTrace)
   of "nilseqs": result = contains(conf.options, optNilSeqs)
-  of "oldast": result = contains(conf.options, optOldAst)
   else: invalidCmdLineOption(conf, passCmd1, switch, info)
 
 proc processPath(conf: ConfigRef; path: string, info: TLineInfo,
@@ -582,19 +581,7 @@ proc processSwitch*(switch, arg: string, pass: TCmdLinePass, info: TLineInfo;
     else:
       undefSymbol(conf.symbols, "hotcodereloading")
       undefSymbol(conf.symbols, "useNimRtl")
-  of "oldnewlines":
-    case arg.normalize
-    of "", "on":
-      conf.oldNewlines = true
-      defineSymbol(conf.symbols, "nimOldNewlines")
-    of "off":
-      conf.oldNewlines = false
-      undefSymbol(conf.symbols, "nimOldNewlines")
-    else:
-      localError(conf, info, errOnOrOffExpectedButXFound % arg)
-  of "laxstrings": processOnOffSwitch(conf, {optLaxStrings}, arg, pass, info)
   of "nilseqs": processOnOffSwitch(conf, {optNilSeqs}, arg, pass, info)
-  of "oldast": processOnOffSwitch(conf, {optOldAst}, arg, pass, info)
   of "checks", "x": processOnOffSwitch(conf, ChecksOptions, arg, pass, info)
   of "floatchecks":
     processOnOffSwitch(conf, {optNaNCheck, optInfCheck}, arg, pass, info)
@@ -879,6 +866,9 @@ proc processSwitch*(switch, arg: string, pass: TCmdLinePass, info: TLineInfo;
   of "expandmacro":
     expectArg(conf, switch, arg, pass, info)
     conf.macrosToExpand[arg] = "T"
+  of "expandarc":
+    expectArg(conf, switch, arg, pass, info)
+    conf.arcToExpand[arg] = "T"
   of "oldgensym":
     processOnOffSwitchG(conf, {optNimV019}, arg, pass, info)
   of "useversion":
@@ -891,12 +881,15 @@ proc processSwitch*(switch, arg: string, pass: TCmdLinePass, info: TLineInfo;
       defineSymbol(conf.symbols, "NimPatch", "100")
       # old behaviors go here:
       defineSymbol(conf.symbols, "nimOldRelativePathBehavior")
+      undefSymbol(conf.symbols, "nimDoesntTrackDefects")
       ast.eqTypeFlags.excl {tfGcSafe, tfNoSideEffect}
       conf.globalOptions.incl optNimV1Emulation
     else:
       localError(conf, info, "unknown Nim version; currently supported values are: {1.0}")
   of "benchmarkvm":
     processOnOffSwitchG(conf, {optBenchmarkVM}, arg, pass, info)
+  of "profilevm":
+    processOnOffSwitchG(conf, {optProfileVM}, arg, pass, info)
   of "sinkinference":
     processOnOffSwitch(conf, {optSinkInference}, arg, pass, info)
   of "panics":
@@ -912,8 +905,6 @@ proc processSwitch*(switch, arg: string, pass: TCmdLinePass, info: TLineInfo;
   else:
     if strutils.find(switch, '.') >= 0: options.setConfigVar(conf, switch, arg)
     else: invalidCmdLineOption(conf, pass, switch, info)
-
-template gCmdLineInfo*(): untyped = newLineInfo(commandLineIdx, 1, 1)
 
 proc processCommand*(switch: string, pass: TCmdLinePass; config: ConfigRef) =
   var cmd, arg: string
