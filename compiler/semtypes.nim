@@ -663,14 +663,14 @@ proc semRecordCase(c: PContext, n: PNode, check: var IntSet, pos: var int,
     internalError(c.config, "semRecordCase: discriminant is no symbol")
     return
   incl(a[0].sym.flags, sfDiscriminant)
-  var covered: Int128 = toInt128(0)
+  var covered = toInt128(0)
   var chckCovered = false
   var typ = skipTypes(a[0].typ, abstractVar-{tyTypeDesc})
   const shouldChckCovered = {tyInt..tyInt64, tyChar, tyEnum, tyUInt..tyUInt32, tyBool}
   case typ.kind
   of shouldChckCovered:
     chckCovered = true
-  of tyFloat..tyFloat128, tyString, tyError:
+  of tyFloat..tyFloat128, tyError:
     discard
   of tyRange:
     if skipTypes(typ[0], abstractInst).kind in shouldChckCovered:
@@ -678,7 +678,7 @@ proc semRecordCase(c: PContext, n: PNode, check: var IntSet, pos: var int,
   of tyForward:
     errorUndeclaredIdentifier(c, n[0].info, typ.sym.name.s)
   elif not isOrdinalType(typ):
-    localError(c.config, n[0].info, "selector must be of an ordinal type, float or string")
+    localError(c.config, n[0].info, "selector must be of an ordinal type, float")
   if firstOrd(c.config, typ) != 0:
     localError(c.config, n.info, "low(" & $a[0].sym.name.s &
                                      ") must be 0 for discriminant")
@@ -744,6 +744,8 @@ proc semRecordNodeAux(c: PContext, n: PNode, check: var IntSet, pos: var int,
       father.add n
     elif branch != nil:
       semRecordNodeAux(c, branch, check, pos, father, rectype, hasCaseFields)
+    elif father.kind in {nkElse, nkOfBranch}:
+      father.add newNodeI(nkRecList, n.info)
   of nkRecCase:
     semRecordCase(c, n, check, pos, father, rectype)
   of nkNilLit:
@@ -800,7 +802,9 @@ proc semRecordNodeAux(c: PContext, n: PNode, check: var IntSet, pos: var int,
     if containsOrIncl(check, n.sym.name.id):
       localError(c.config, n.info, "attempt to redefine: '" & n.sym.name.s & "'")
     father.add n
-  of nkEmpty: discard
+  of nkEmpty:
+    if father.kind in {nkElse, nkOfBranch}:
+      father.add n
   else: illFormedAst(n, c.config)
 
 proc addInheritedFieldsAux(c: PContext, check: var IntSet, pos: var int,
