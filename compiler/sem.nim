@@ -17,7 +17,7 @@ import
   intsets, transf, vmdef, vm, idgen, aliases, cgmeth, lambdalifting,
   evaltempl, patterns, parampatterns, sempass2, linter, semmacrosanity,
   lowerings, plugins/active, rod, lineinfos, strtabs, int128,
-  isolation_check
+  isolation_check, typeallowed
 
 from modulegraphs import ModuleGraph, PPassContext, onUse, onDef, onDefResolveForward
 
@@ -228,9 +228,9 @@ proc semIdentVis(c: PContext, kind: TSymKind, n: PNode,
 proc semIdentWithPragma(c: PContext, kind: TSymKind, n: PNode,
                         allowed: TSymFlags): PSym
 
-proc typeAllowedCheck(conf: ConfigRef; info: TLineInfo; typ: PType; kind: TSymKind;
+proc typeAllowedCheck(c: PContext; info: TLineInfo; typ: PType; kind: TSymKind;
                       flags: TTypeAllowedFlags = {}) =
-  let t = typeAllowed(typ, kind, flags)
+  let t = typeAllowed(typ, kind, c, flags)
   if t != nil:
     var err: string
     if t == typ:
@@ -240,10 +240,10 @@ proc typeAllowedCheck(conf: ConfigRef; info: TLineInfo; typ: PType; kind: TSymKi
     else:
       err = "invalid type: '$1' in this context: '$2' for $3" % [typeToString(t),
               typeToString(typ), toHumanStr(kind)]
-    localError(conf, info, err)
+    localError(c.config, info, err)
 
 proc paramsTypeCheck(c: PContext, typ: PType) {.inline.} =
-  typeAllowedCheck(c.config, typ.n.info, typ, skProc)
+  typeAllowedCheck(c, typ.n.info, typ, skProc)
 
 proc expectMacroOrTemplateCall(c: PContext, n: PNode): PSym
 proc semDirectOp(c: PContext, n: PNode, flags: TExprFlags): PNode
@@ -383,12 +383,10 @@ when not defined(nimHasSinkInference):
 
 include hlo, seminst, semcall
 
-when false:
-  # hopefully not required:
-  proc resetSemFlag(n: PNode) =
-    excl n.flags, nfSem
-    for i in 0..<n.safeLen:
-      resetSemFlag(n[i])
+proc resetSemFlag(n: PNode) =
+  excl n.flags, nfSem
+  for i in 0..<n.safeLen:
+    resetSemFlag(n[i])
 
 proc semAfterMacroCall(c: PContext, call, macroResult: PNode,
                        s: PSym, flags: TExprFlags): PNode =
@@ -403,8 +401,7 @@ proc semAfterMacroCall(c: PContext, call, macroResult: PNode,
   c.friendModules.add(s.owner.getModule)
   idSynchronizationPoint(5000)
   result = macroResult
-  excl(result.flags, nfSem)
-  #resetSemFlag n
+  resetSemFlag result
   if s.typ[0] == nil:
     result = semStmt(c, result, flags)
   else:

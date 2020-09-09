@@ -94,10 +94,6 @@ proc pickBestCandidate(c: PContext, headSymbol: PNode,
     if c.currentScope.symbols.counter == counterInitial or syms.len != 0:
       matches(c, n, orig, z)
       if z.state == csMatch:
-        #if sym.name.s == "==" and (n.info ?? "temp3"):
-        #  echo typeToString(sym.typ)
-        #  writeMatches(z)
-
         # little hack so that iterators are preferred over everything else:
         if sym.kind == skIterator: inc(z.exactMatches, 200)
         case best.state
@@ -499,9 +495,14 @@ proc updateDefaultParams(call: PNode) =
 proc getCallLineInfo(n: PNode): TLineInfo =
   case n.kind
   of nkAccQuoted, nkBracketExpr, nkCall, nkCallStrLit, nkCommand:
-    getCallLineInfo(n[0])
-  of nkDotExpr: getCallLineInfo(n[1])
-  else: n.info
+    if len(n) > 0:
+      return getCallLineInfo(n[0])
+  of nkDotExpr:
+    if len(n) > 1:
+      return getCallLineInfo(n[1])
+  else:
+    discard
+  result = n.info
 
 proc semResolvedCall(c: PContext, x: TCandidate,
                      n: PNode, flags: TExprFlags): PNode =

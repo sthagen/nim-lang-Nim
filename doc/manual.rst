@@ -5019,23 +5019,16 @@ delayed until template instantiation time:
     :status: 1
 
   template t(body: typed) =
+    proc p = echo "hey"
     block:
       body
 
   t:
-    var i = 1
-    echo i
+    p()  # fails with 'undeclared identifier: p'
 
-  t:
-    var i = 2  # fails with 'attempt to redeclare i'
-    echo i
-
-The above code fails with the mysterious error message that ``i`` has already
-been declared. The reason for this is that the ``var i = ...`` bodies need to
-be type-checked before they are passed to the ``body`` parameter and type
-checking in Nim implies symbol lookups. For the symbol lookups to succeed
-``i`` needs to be added to the current (i.e. outer) scope. After type checking
-these additions to the symbol table are not rolled back (for better or worse).
+The above code fails with the error message that ``p`` is not declared.
+The reason for this is that the ``p()`` body is type-checked before getting
+passed to the ``body`` parameter and type checking in Nim implies symbol lookups.
 The same code works with ``untyped`` as the passed body is not required to be
 type-checked:
 
@@ -5043,16 +5036,12 @@ type-checked:
     :test: "nim c $1"
 
   template t(body: untyped) =
+    proc p = echo "hey"
     block:
       body
 
   t:
-    var i = 1
-    echo i
-
-  t:
-    var i = 2  # compiles
-    echo i
+    p()  # compiles
 
 
 Varargs of untyped
@@ -5478,6 +5467,48 @@ powerful programming construct that still suffices. So the "check list" is:
 (2) Else: Use a generic proc/iterator, if possible.
 (3) Else: Use a template, if possible.
 (4) Else: Use a macro.
+
+
+For loop macros
+---------------
+
+A macro that takes as its only input parameter an expression of the special
+type ``system.ForLoopStmt`` can rewrite the entirety of a ``for`` loop:
+
+.. code-block:: nim
+    :test: "nim c $1"
+
+  import macros
+
+  macro enumerate(x: ForLoopStmt): untyped =
+    expectKind x, nnkForStmt
+    # we strip off the first for loop variable and use
+    # it as an integer counter:
+    result = newStmtList()
+    result.add newVarStmt(x[0], newLit(0))
+    var body = x[^1]
+    if body.kind != nnkStmtList:
+      body = newTree(nnkStmtList, body)
+    body.add newCall(bindSym"inc", x[0])
+    var newFor = newTree(nnkForStmt)
+    for i in 1..x.len-3:
+      newFor.add x[i]
+    # transform enumerate(X) to 'X'
+    newFor.add x[^2][1]
+    newFor.add body
+    result.add newFor
+    # now wrap the whole macro in a block to create a new scope
+    result = quote do:
+      block: `result`
+
+  for a, b in enumerate(items([1, 2, 3])):
+    echo a, " ", b
+
+  # without wrapping the macro in a block, we'd need to choose different
+  # names for `a` and `b` here to avoid redefinition errors
+  for a, b in enumerate([1, 2, 3, 5]):
+    echo a, " ", b
+
 
 
 Special Types

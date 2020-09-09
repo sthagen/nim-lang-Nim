@@ -20,7 +20,9 @@
 ## ====
 ##
 ## In order to use the SSL procedures defined in this module, you will need to
-## compile your application with the ``-d:ssl`` flag.
+## compile your application with the ``-d:ssl`` flag. See the
+## `newContext<net.html#newContext%2Cstring%2Cstring%2Cstring%2Cstring%2Cstring>`_
+## procedure for additional details.
 ##
 ## Examples
 ## ========
@@ -36,9 +38,17 @@
 ##   var socket = newSocket()
 ##   socket.connect("google.com", Port(80))
 ##
+## For SSL, use the following example (and make sure to compile with ``-d:ssl``):
+##
+## .. code-block:: Nim
+##   var socket = newSocket()
+##   var ctx = newContext()
+##   wrapSocket(ctx, socket)
+##   socket.connect("google.com", Port(443))
+##
 ## UDP is a connectionless protocol, so UDP sockets don't have to explicitly
-## call the ``connect`` procedure. They can simply start sending data
-## immediately.
+## call the `connect <net.html#connect%2CSocket%2Cstring>`_ procedure. They can
+## simply start sending data immediately.
 ##
 ## .. code-block:: Nim
 ##   var socket = newSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
@@ -116,7 +126,7 @@ when defineSsl:
 
 else:
   type
-    SslContext* = void # TODO: Workaround #4797.
+    SslContext* = ref object # TODO: Workaround #4797.
 
 const
   BufferSize*: int = 4000 ## size of a buffered socket's buffer
@@ -815,6 +825,22 @@ when defineSsl:
     else:
       result = getPeerCertificates(socket.sslHandle)
 
+  proc `sessionIdContext=`*(ctx: SslContext, sidCtx: string) =
+    ## Sets the session id context in which a session can be reused.
+    ## Used for permitting clients to reuse a session id instead of
+    ## doing a new handshake.
+    ##
+    ## TLS clients might attempt to resume a session using the session id context,
+    ## thus it must be set if verifyMode is set to CVerifyPeer or CVerifyPeerUseEnvVars,
+    ## otherwise the connection will fail and SslError will be raised if resumption occurs.
+    ##
+    ## - Only useful if set server-side.
+    ## - Should be unique per-application to prevent clients from malfunctioning.
+    ## - sidCtx must be at most 32 characters in length.
+    if sidCtx.len > 32:
+      raiseSSLError("sessionIdContext must be shorter than 32 characters")
+    SSL_CTX_set_session_id_context(ctx.context, sidCtx, sidCtx.len)
+  
 proc getSocketError*(socket: Socket): OSErrorCode =
   ## Checks ``osLastError`` for a valid error. If it has been reset it uses
   ## the last error stored in the socket object.
@@ -1942,6 +1968,10 @@ proc connect*(socket: Socket, address: string, port = Port(0),
   ##
   ## The ``timeout`` parameter specifies the time in milliseconds to allow for
   ## the connection to the server to be made.
+  ##
+  ## **Warning:** This procedure appears to be broken for SSL connections as of
+  ## Nim v1.0.2. Consider using the other `connect` procedure. See
+  ## https://github.com/nim-lang/Nim/issues/15215 for more info.
   socket.fd.setBlocking(false)
 
   socket.connectAsync(address, port, socket.domain)

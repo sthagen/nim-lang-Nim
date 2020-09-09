@@ -164,7 +164,14 @@
   echo foo
   ```
 
+- Proc `math.round` is no longer deprecated. The advice to use `strformat` instead
+  cannot be applied to every use case. The limitations and the (lack of) reliability
+  of `round` are well documented.
+
+
+
 ## Language changes
+
 - The `=destroy` hook no longer has to reset its target, as the compiler now automatically inserts
   `wasMoved` calls where needed.
 - In the newruntime it is now allowed to assign to the discriminator field
@@ -242,6 +249,10 @@ proc mydiv(a, b): int {.raises: [].} =
 - There is a new experimental feature called "strictFuncs" which makes the definition of
   `.noSideEffect` stricter. [See](manual_experimental.html#stricts-funcs)
   for more information.
+
+- "for-loop macros" (see [the manual](manual.html#macros-for-loop-macros)) are no longer
+  an experimental feature. In other words, you don't have to write pragma
+  `{.experimental: "forLoopMacros".}` if you want to use them.
 
 
 ## Compiler changes
