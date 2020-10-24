@@ -1061,7 +1061,7 @@ proc accept*(server: Socket, client: var owned(Socket),
   var addrDummy = ""
   acceptAddr(server, client, addrDummy, flags)
 
-when defined(posix):
+when defined(posix) and not defined(lwip):
   from posix import Sigset, sigwait, sigismember, sigemptyset, sigaddset,
     sigprocmask, pthread_sigmask, SIGPIPE, SIG_BLOCK, SIG_UNBLOCK
 
@@ -1079,7 +1079,7 @@ template blockSigpipe(body: untyped): untyped =
   ##
   ## For convenience, this template is also available for non-POSIX system,
   ## where `body` will be executed as-is.
-  when not defined(posix):
+  when not defined(posix) or defined(lwip):
     body
   else:
     template sigmask(how: cint, set, oset: var Sigset): untyped {.gensym.} =
@@ -2005,5 +2005,8 @@ proc getPrimaryIPAddr*(dest = parseIpAddress("8.8.8.8")): IpAddress =
       newSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
     else:
       newSocket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP)
-  socket.connect($dest, 80.Port)
-  socket.getLocalAddr()[0].parseIpAddress()
+  try:
+    socket.connect($dest, 80.Port)
+    result = socket.getLocalAddr()[0].parseIpAddress()
+  finally:
+    socket.close()

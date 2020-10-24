@@ -229,7 +229,7 @@ type
   TNodeKinds* = set[TNodeKind]
 
 type
-  TSymFlag* = enum    # 43 flags!
+  TSymFlag* = enum    # 46 flags!
     sfUsed,           # read access of sym (for warnings) or simply used
     sfExported,       # symbol is exported from module
     sfFromGeneric,    # symbol is instantiation of a generic; this is needed
@@ -293,7 +293,8 @@ type
     sfNeverRaises     # proc can never raise an exception, not even OverflowDefect
                       # or out-of-memory
     sfUsedInFinallyOrExcept  # symbol is used inside an 'except' or 'finally'
-    sfSingleUsedTemp   # For temporaries that we know will only be used once
+    sfSingleUsedTemp  # For temporaries that we know will only be used once
+    sfNoalias         # 'noalias' annotation, means C's 'restrict'
 
   TSymFlags* = set[TSymFlag]
 
@@ -680,7 +681,7 @@ type
     mNBindSym, mNCallSite,
     mEqIdent, mEqNimrodNode, mSameNodeType, mGetImpl, mNGenSym,
     mNHint, mNWarning, mNError,
-    mInstantiationInfo, mGetTypeInfo,
+    mInstantiationInfo, mGetTypeInfo, mGetTypeInfoV2,
     mNimvm, mIntDefine, mStrDefine, mBoolDefine, mRunnableExamples,
     mException, mBuiltinType, mSymOwner, mUncheckedArray, mGetImplTransf,
     mSymIsInstantiationOf, mNodeId
@@ -874,7 +875,7 @@ type
     annex*: PLib              # additional fields (seldom used, so we use a
                               # reference to another object to save space)
     when hasFFI:
-      cname*: string          # resolved C declaration name in importc decl, eg:
+      cname*: string          # resolved C declaration name in importc decl, e.g.:
                               # proc fun() {.importc: "$1aux".} => cname = funaux
     constraint*: PNode        # additional constraints like 'lit|result'; also
                               # misused for the codegenDecl pragma in the hope
@@ -1330,7 +1331,7 @@ const
   MaxLockLevel* = 1000'i16
   UnknownLockLevel* = TLockLevel(1001'i16)
   AttachedOpToStr*: array[TTypeAttachedOp, string] = [
-    "=destroy", "=", "=sink", "=trace", "=dispose", "=deepcopy"]
+    "=destroy", "=copy", "=sink", "=trace", "=dispose", "=deepcopy"]
 
 proc `$`*(x: TLockLevel): string =
   if x.ord == UnspecifiedLockLevel.ord: result = "<unspecified>"
@@ -1356,8 +1357,8 @@ proc newType*(kind: TTypeKind, owner: PSym): PType =
       writeStackTrace()
 
 proc mergeLoc(a: var TLoc, b: TLoc) =
-  if a.k == low(a.k): a.k = b.k
-  if a.storage == low(a.storage): a.storage = b.storage
+  if a.k == low(typeof(a.k)): a.k = b.k
+  if a.storage == low(typeof(a.storage)): a.storage = b.storage
   a.flags.incl b.flags
   if a.lode == nil: a.lode = b.lode
   if a.r == nil: a.r = b.r
@@ -1401,9 +1402,6 @@ proc copyType*(t: PType, owner: PSym, keepId: bool): PType =
   result.sym = t.sym          # backend-info should not be copied
 
 proc exactReplica*(t: PType): PType = copyType(t, t.owner, true)
-
-template requiresInit*(t: PType): bool =
-  t.flags * {tfRequiresInit, tfNotNil} != {}
 
 proc copySym*(s: PSym): PSym =
   result = newSym(s.kind, s.name, s.owner, s.info, s.options)

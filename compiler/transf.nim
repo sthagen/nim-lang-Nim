@@ -850,13 +850,6 @@ proc transformExceptBranch(c: PTransf, n: PNode): PNode =
   else:
     result = transformSons(c, n)
 
-proc dontInlineConstant(orig, cnst: PNode): bool {.inline.} =
-  # symbols that expand to a complex constant (array, etc.) should not be
-  # inlined, unless it's the empty array:
-  result = orig.kind == nkSym and
-           cnst.kind in {nkCurly, nkPar, nkTupleConstr, nkBracket} and
-           cnst.len != 0
-
 proc commonOptimizations*(g: ModuleGraph; c: PSym, n: PNode): PNode =
   result = n
   for i in 0..<n.safeLen:
@@ -1016,6 +1009,7 @@ proc transform(c: PTransf, n: PNode): PNode =
   # Constants can be inlined here, but only if they cannot result in a cast
   # in the back-end (e.g. var p: pointer = someProc)
   let exprIsPointerCast = n.kind in {nkCast, nkConv, nkHiddenStdConv} and
+                          n.typ != nil and
                           n.typ.kind == tyPointer
   if not exprIsPointerCast:
     var cnst = getConstExpr(c.module, result, c.graph)
