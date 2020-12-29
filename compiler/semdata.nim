@@ -70,13 +70,25 @@ type
 
   TExprFlags* = set[TExprFlag]
 
+  ImportMode* = enum
+    importAll, importSet, importExcept
+  ImportedModule* = object
+    m*: PSym
+    case mode*: ImportMode
+    of importAll: discard
+    of importSet:
+      imported*: IntSet
+    of importExcept:
+      exceptSet*: IntSet
+
   PContext* = ref TContext
   TContext* = object of TPassContext # a context represents the module
                                      # that is currently being compiled
     enforceVoidContext*: PType
     module*: PSym              # the module sym belonging to the context
     currentScope*: PScope      # current scope
-    importTable*: PScope       # scope for all imported symbols
+    moduleScope*: PScope       # scope for modules
+    imports*: seq[ImportedModule] # scope for all imported symbols
     topLevelScope*: PScope     # scope for all top-level symbols
     p*: PProcCon               # procedure context
     matchedConcept*: ptr TMatchedConcept # the current concept being matched
@@ -85,9 +97,6 @@ type
                                # can access private object fields
     instCounter*: int          # to prevent endless instantiations
     templInstCounter*: ref int # gives every template instantiation a unique id
-
-    ambiguousSymbols*: IntSet  # ids of all ambiguous symbols (cannot
-                               # store this info in the syms themselves!)
     inGenericContext*: int     # > 0 if we are in a generic type
     inStaticContext*: int      # > 0 if we are inside a static: block
     inUnrolledContext*: int    # > 0 if we are unrolling a loop
@@ -134,6 +143,7 @@ type
     signatures*: TStrTable
     recursiveDep*: string
     suggestionsMade*: bool
+    isAmbiguous*: bool # little hack
     features*: set[Feature]
     inTypeContext*: int
     typesWithOps*: seq[(PType, PType)] #\
@@ -238,7 +248,6 @@ proc popOptionEntry*(c: PContext) =
 proc newContext*(graph: ModuleGraph; module: PSym): PContext =
   new(result)
   result.enforceVoidContext = PType(kind: tyTyped)
-  result.ambiguousSymbols = initIntSet()
   result.optionStack = @[newOptionEntry(graph.config)]
   result.libs = @[]
   result.module = module
@@ -263,9 +272,14 @@ proc inclSym(sq: var seq[PSym], s: PSym) =
 
 proc addConverter*(c: PContext, conv: PSym) =
   inclSym(c.converters, conv)
+  inclSym(c.graph.ifaces[c.module.position].converters, conv)
+
+proc addPureEnum*(c: PContext, e: PSym) =
+  inclSym(c.graph.ifaces[c.module.position].pureEnums, e)
 
 proc addPattern*(c: PContext, p: PSym) =
   inclSym(c.patterns, p)
+  inclSym(c.graph.ifaces[c.module.position].patterns, p)
 
 proc newLib*(kind: TLibKind): PLib =
   new(result)
@@ -277,14 +291,14 @@ proc addToLib*(lib: PLib, sym: PSym) =
   sym.annex = lib
 
 proc newTypeS*(kind: TTypeKind, c: PContext): PType =
-  result = newType(kind, getCurrOwner(c))
+  result = newType(kind, nextId(c.idgen), getCurrOwner(c))
 
-proc makePtrType*(owner: PSym, baseType: PType): PType =
-  result = newType(tyPtr, owner)
-  addSonSkipIntLit(result, baseType)
+proc makePtrType*(owner: PSym, baseType: PType; idgen: IdGenerator): PType =
+  result = newType(tyPtr, nextId(idgen), owner)
+  addSonSkipIntLit(result, baseType, idgen)
 
 proc makePtrType*(c: PContext, baseType: PType): PType =
-  makePtrType(getCurrOwner(c), baseType)
+  makePtrType(getCurrOwner(c), baseType, c.idgen)
 
 proc makeTypeWithModifier*(c: PContext,
                            modifier: TTypeKind,
@@ -295,21 +309,21 @@ proc makeTypeWithModifier*(c: PContext,
     result = baseType
   else:
     result = newTypeS(modifier, c)
-    addSonSkipIntLit(result, baseType)
+    addSonSkipIntLit(result, baseType, c.idgen)
 
 proc makeVarType*(c: PContext, baseType: PType; kind = tyVar): PType =
   if baseType.kind == kind:
     result = baseType
   else:
     result = newTypeS(kind, c)
-    addSonSkipIntLit(result, baseType)
+    addSonSkipIntLit(result, baseType, c.idgen)
 
-proc makeVarType*(owner: PSym, baseType: PType; kind = tyVar): PType =
+proc makeVarType*(owner: PSym, baseType: PType; idgen: IdGenerator; kind = tyVar): PType =
   if baseType.kind == kind:
     result = baseType
   else:
-    result = newType(kind, owner)
-    addSonSkipIntLit(result, baseType)
+    result = newType(kind, nextId(idgen), owner)
+    addSonSkipIntLit(result, baseType, idgen)
 
 proc makeTypeDesc*(c: PContext, typ: PType): PType =
   if typ.kind == tyTypeDesc:
@@ -317,14 +331,14 @@ proc makeTypeDesc*(c: PContext, typ: PType): PType =
   else:
     result = newTypeS(tyTypeDesc, c)
     incl result.flags, tfCheckedForDestructor
-    result.addSonSkipIntLit(typ)
+    result.addSonSkipIntLit(typ, c.idgen)
 
 proc makeTypeSymNode*(c: PContext, typ: PType, info: TLineInfo): PNode =
   let typedesc = newTypeS(tyTypeDesc, c)
   incl typedesc.flags, tfCheckedForDestructor
   internalAssert(c.config, typ != nil)
-  typedesc.addSonSkipIntLit(typ)
-  let sym = newSym(skType, c.cache.idAnon, getCurrOwner(c), info,
+  typedesc.addSonSkipIntLit(typ, c.idgen)
+  let sym = newSym(skType, c.cache.idAnon, nextId(c.idgen), getCurrOwner(c), info,
                    c.config.options).linkTo(typedesc)
   return newSymNode(sym, info)
 
@@ -333,13 +347,14 @@ proc makeTypeFromExpr*(c: PContext, n: PNode): PType =
   assert n != nil
   result.n = n
 
-proc newTypeWithSons*(owner: PSym, kind: TTypeKind, sons: seq[PType]): PType =
-  result = newType(kind, owner)
+proc newTypeWithSons*(owner: PSym, kind: TTypeKind, sons: seq[PType];
+                      idgen: IdGenerator): PType =
+  result = newType(kind, nextId(idgen), owner)
   result.sons = sons
 
 proc newTypeWithSons*(c: PContext, kind: TTypeKind,
                       sons: seq[PType]): PType =
-  result = newType(kind, getCurrOwner(c))
+  result = newType(kind, nextId(c.idgen), getCurrOwner(c))
   result.sons = sons
 
 proc makeStaticExpr*(c: PContext, n: PNode): PNode =
@@ -418,7 +433,7 @@ proc makeRangeType*(c: PContext; first, last: BiggestInt;
   n.add newIntTypeNode(last, intType)
   result = newTypeS(tyRange, c)
   result.n = n
-  addSonSkipIntLit(result, intType) # basetype of range
+  addSonSkipIntLit(result, intType, c.idgen) # basetype of range
 
 proc markIndirect*(c: PContext, s: PSym) {.inline.} =
   if s.kind in {skProc, skFunc, skConverter, skMethod, skIterator}:
