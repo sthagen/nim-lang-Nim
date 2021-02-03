@@ -239,7 +239,7 @@ not guaranteed to stay in sync, so ``runnableExamples`` is usually preferred:
 .. code-block:: nim
 
   proc someproc*(): string =
-    ## Return "something"
+    ## Returns "something"
     ##
     ## .. code-block::
     ##  echo someproc() # "something"
@@ -262,12 +262,12 @@ first appearance of the proc.
     echo "hello"
 
 The preferred documentation style is to begin with a capital letter and use
-the imperative (command) form. That is, between:
+the third-person singular. That is, between:
 
 .. code-block:: nim
 
   proc hello*(): string =
-    ## Return "hello"
+    ## Returns "hello"
     result = "hello"
 
 or
@@ -275,7 +275,7 @@ or
 .. code-block:: nim
 
   proc hello*(): string =
-    ## says hello
+    ## say hello
     result = "hello"
 
 the first is preferred.
@@ -587,6 +587,6 @@ use `lib/std/collections/foo.nim`, not `lib/pure/collections/foo.nim`.
 
 2. New module names should prefer plural form whenever possible, e.g.:
 `std/sums.nim` instead of `std/sum.nim`. In particular, this reduces chances of conflicts
-between module name and the symbols it defines. Furthermore, is should use `snake_case`
-and not use capital letters, which cause issues when going from an OS without case
-sensitivity to an OS without it.
+between module name and the symbols it defines. Furthermore, module names should
+use `snake_case` and not use capital letters, which cause issues when going
+from an OS without case sensitivity to an OS with it.

@@ -1151,25 +1151,12 @@ proc symlinkExists*(link: string): bool {.rtl, extern: "nos$1",
     else:
       var a = getFileAttributesA(link)
     if a != -1'i32:
+      # xxx see: bug #16784 (bug9); checking `IO_REPARSE_TAG_SYMLINK`
+      # may also be needed.
       result = (a and FILE_ATTRIBUTE_REPARSE_POINT) != 0'i32
   else:
     var res: Stat
     return lstat(link, res) >= 0'i32 and S_ISLNK(res.st_mode)
-
-
-when not defined(nimscript):
-  when not defined(js): # `noNimJs` doesn't work with templates, this should improve.
-    template existsFile*(args: varargs[untyped]): untyped {.deprecated: "use fileExists".} =
-      fileExists(args)
-    template existsDir*(args: varargs[untyped]): untyped {.deprecated: "use dirExists".} =
-      dirExists(args)
-  # {.deprecated: [existsFile: fileExists].} # pending bug #14819; this would avoid above mentioned issue
-
-when not defined(windows) and not weirdTarget:
-  proc checkSymlink(path: string): bool =
-    var rawInfo: Stat
-    if lstat(path, rawInfo) < 0'i32: result = false
-    else: result = S_ISLNK(rawInfo.st_mode)
 
 const
   maxSymlinkLen = 1024
@@ -1213,7 +1200,7 @@ proc findExe*(exe: string, followSymlinks: bool = true;
       if fileExists(x):
         when not defined(windows):
           while followSymlinks: # doubles as if here
-            if x.checkSymlink:
+            if x.symlinkExists:
               var r = newString(maxSymlinkLen)
               var len = readlink(x, r, maxSymlinkLen)
               if len < 0:
@@ -1647,6 +1634,24 @@ proc setFilePermissions*(filename: string, permissions: set[FilePermission]) {.
       var res2 = setFileAttributesA(filename, res)
     if res2 == - 1'i32: raiseOSError(osLastError(), $(filename, permissions))
 
+const hasCCopyfile = defined(osx) and not defined(nimLegacyCopyFile)
+  # xxx instead of `nimLegacyCopyFile`, support something like: `when osxVersion >= (10, 5)`
+
+when hasCCopyfile:
+  # `copyfile` API available since osx 10.5.
+  {.push nodecl, header: "<copyfile.h>".}
+  type
+    copyfile_state_t {.nodecl.} = pointer
+    copyfile_flags_t = cint
+  proc copyfile_state_alloc(): copyfile_state_t
+  proc copyfile_state_free(state: copyfile_state_t): cint
+  proc c_copyfile(src, dst: cstring,  state: copyfile_state_t, flags: copyfile_flags_t): cint {.importc: "copyfile".}
+  # replace with `let` pending bootstrap >= 1.4.0
+  var
+    COPYFILE_DATA {.nodecl.}: copyfile_flags_t
+    COPYFILE_XATTR {.nodecl.}: copyfile_flags_t
+  {.pop.}
+
 proc copyFile*(source, dest: string) {.rtl, extern: "nos$1",
   tags: [ReadIOEffect, WriteIOEffect], noWeirdTarget.} =
   ## Copies a file from `source` to `dest`, where `dest.parentDir` must exist.
@@ -1666,6 +1671,9 @@ proc copyFile*(source, dest: string) {.rtl, extern: "nos$1",
   ##
   ## If `dest` already exists, the file attributes
   ## will be preserved and the content overwritten.
+  ## 
+  ## On OSX, `copyfile` C api will be used (available since OSX 10.5) unless
+  ## `-d:nimLegacyCopyFile` is used.
   ##
   ## See also:
   ## * `copyDir proc <#copyDir,string,string>`_
@@ -1681,6 +1689,16 @@ proc copyFile*(source, dest: string) {.rtl, extern: "nos$1",
       if copyFileW(s, d, 0'i32) == 0'i32: raiseOSError(osLastError(), $(source, dest))
     else:
       if copyFileA(source, dest, 0'i32) == 0'i32: raiseOSError(osLastError(), $(source, dest))
+  elif hasCCopyfile:
+    let state = copyfile_state_alloc()
+    # xxx `COPYFILE_STAT` could be used for one-shot `copyFileWithPermissions`.
+    let status = c_copyfile(source.cstring, dest.cstring, state, COPYFILE_DATA)
+    if status != 0:
+      let err = osLastError()
+      discard copyfile_state_free(state)
+      raiseOSError(err, $(source, dest))
+    let status2 = copyfile_state_free(state)
+    if status2 != 0: raiseOSError(osLastError(), $(source, dest))
   else:
     # generic version of copyFile which works for any platform:
     const bufSize = 8000 # better for memory manager
@@ -2670,7 +2688,7 @@ when defined(nimdoc):
     ##   else:
     ##     # Do something else!
 
-  proc paramStr*(i: int): TaintedString {.tags: [ReadIOEffect].} =
+  proc paramStr*(i: int): string {.tags: [ReadIOEffect].} =
     ## Returns the `i`-th `command line argument`:idx: given to the application.
     ##
     ## `i` should be in the range `1..paramCount()`, the `IndexDefect`
@@ -2704,7 +2722,7 @@ when defined(nimdoc):
 
 elif defined(nimscript): discard
 elif defined(nintendoswitch) or weirdTarget:
-  proc paramStr*(i: int): TaintedString {.tags: [ReadIOEffect].} =
+  proc paramStr*(i: int): string {.tags: [ReadIOEffect].} =
     raise newException(OSError, "paramStr is not implemented on Nintendo Switch")
 
   proc paramCount*(): int {.tags: [ReadIOEffect].} =
@@ -2727,17 +2745,17 @@ elif defined(windows):
       ownParsedArgv = true
     result = ownArgv.len-1
 
-  proc paramStr*(i: int): TaintedString {.rtl, extern: "nos$1",
+  proc paramStr*(i: int): string {.rtl, extern: "nos$1",
     tags: [ReadIOEffect].} =
     # Docstring in nimdoc block.
     if not ownParsedArgv:
       ownArgv = parseCmdLine($getCommandLine())
       ownParsedArgv = true
-    if i < ownArgv.len and i >= 0: return TaintedString(ownArgv[i])
+    if i < ownArgv.len and i >= 0: return ownArgv[i]
     raise newException(IndexDefect, formatErrorIndexBound(i, ownArgv.len-1))
 
 elif defined(genode):
-  proc paramStr*(i: int): TaintedString =
+  proc paramStr*(i: int): string =
     raise newException(OSError, "paramStr is not implemented on Genode")
 
   proc paramCount*(): int =
@@ -2750,9 +2768,9 @@ elif not defined(createNimRtl) and
     cmdCount {.importc: "cmdCount".}: cint
     cmdLine {.importc: "cmdLine".}: cstringArray
 
-  proc paramStr*(i: int): TaintedString {.tags: [ReadIOEffect].} =
+  proc paramStr*(i: int): string {.tags: [ReadIOEffect].} =
     # Docstring in nimdoc block.
-    if i < cmdCount and i >= 0: return TaintedString($cmdLine[i])
+    if i < cmdCount and i >= 0: return $cmdLine[i]
     raise newException(IndexDefect, formatErrorIndexBound(i, cmdCount-1))
 
   proc paramCount*(): int {.tags: [ReadIOEffect].} =
@@ -2760,7 +2778,7 @@ elif not defined(createNimRtl) and
     result = cmdCount-1
 
 when declared(paramCount) or defined(nimdoc):
-  proc commandLineParams*(): seq[TaintedString] =
+  proc commandLineParams*(): seq[string] =
     ## Convenience proc which returns the command line parameters.
     ##
     ## This returns **only** the parameters. If you want to get the application
@@ -2789,7 +2807,7 @@ when declared(paramCount) or defined(nimdoc):
     for i in 1..paramCount():
       result.add(paramStr(i))
 else:
-  proc commandLineParams*(): seq[TaintedString] {.error:
+  proc commandLineParams*(): seq[string] {.error:
   "commandLineParams() unsupported by dynamic libraries".} =
     discard
 
@@ -3310,3 +3328,12 @@ func isValidFilename*(filename: string, maxLen = 259.Positive): bool {.since: (1
     find(f.name, invalidFilenameChars) != -1): return false
   for invalid in invalidFilenames:
     if cmpIgnoreCase(f.name, invalid) == 0: return false
+
+# deprecated declarations
+when not defined(nimscript):
+  when not defined(js): # `noNimJs` doesn't work with templates, this should improve.
+    template existsFile*(args: varargs[untyped]): untyped {.deprecated: "use fileExists".} =
+      fileExists(args)
+    template existsDir*(args: varargs[untyped]): untyped {.deprecated: "use dirExists".} =
+      dirExists(args)
+  # {.deprecated: [existsFile: fileExists].} # pending bug #14819; this would avoid above mentioned issue

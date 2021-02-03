@@ -306,6 +306,23 @@ block: # bug #8007
   const d = @[Cost(kind: Fixed, cost: 999), Cost(kind: Dynamic, handler: foo)]
   doAssert $d == "@[(kind: Fixed, cost: 999), (kind: Dynamic, handler: ...)]"
 
+block: # bug #14340
+  block:
+    proc opl3EnvelopeCalcSin0() = discard
+    type EnvelopeSinfunc = proc()
+    # const EnvelopeCalcSin0 = opl3EnvelopeCalcSin0 # ok
+    const EnvelopeCalcSin0: EnvelopeSinfunc = opl3EnvelopeCalcSin0 # was bug
+    const envelopeSin = [EnvelopeCalcSin0]
+    var a = 0
+    envelopeSin[a]()
+
+  block:
+    type Mutator = proc() {.noSideEffect, gcsafe, locks: 0.}
+    proc mutator0() = discard
+    const mTable = [Mutator(mutator0)]
+    var i=0
+    mTable[i]()
+
 block: # VM wrong register free causes errors in unrelated code
   block: # bug #15597
     #[
@@ -435,3 +452,60 @@ block: # VM wrong register free causes errors in unrelated code
     proc main() =
       processAux(bar(globOpt(initGlobOpt(dir))))
     static: main()
+
+block: # bug #8015
+  block:
+    type Foo = object
+      case b: bool
+      of false: v1: int
+      of true: v2: int
+    const t = [Foo(b: false, v1: 1), Foo(b: true, v2: 2)]
+    doAssert $t == "[(b: false, v1: 1), (b: true, v2: 2)]"
+    doAssert $t[0] == "(b: false, v1: 1)" # was failing
+
+  block:
+    type
+      CostKind = enum
+        Fixed,
+        Dynamic
+
+      Cost = object
+        case kind*: CostKind
+        of Fixed:
+          cost*: int
+        of Dynamic:
+          handler*: proc(): int {.nimcall.}
+
+    proc foo1(): int {.nimcall.} =
+      100
+
+    proc foo2(): int {.nimcall.} =
+      200
+
+    # Change to `let` and it doesn't crash
+    const costTable = [
+      0: Cost(kind: Fixed, cost: 999),
+      1: Cost(kind: Dynamic, handler: foo1),
+      2: Cost(kind: Dynamic, handler: foo2)
+    ]
+
+    doAssert $costTable[0] == "(kind: Fixed, cost: 999)"
+    doAssert costTable[1].handler() == 100
+    doAssert costTable[2].handler() == 200
+
+    # Now trying to carry the table as an object field
+    type
+      Wrapper = object
+        table: array[3, Cost]
+
+    proc procNewWrapper(): Wrapper =
+      result.table = costTable
+
+    # Alternatively, change to `const` and it doesn't crash
+    let viaProc = procNewWrapper()
+
+    doAssert viaProc.table[1].handler != nil
+    doAssert viaProc.table[2].handler != nil
+    doAssert $viaProc.table[0] == "(kind: Fixed, cost: 999)"
+    doAssert viaProc.table[1].handler() == 100
+    doAssert viaProc.table[2].handler() == 200

@@ -57,7 +57,14 @@ include "system/basic_types"
 
 proc compileOption*(option: string): bool {.
   magic: "CompileOption", noSideEffect.}
-  ## Can be used to determine an `on|off` compile-time option. Example:
+  ## Can be used to determine an `on|off` compile-time option.
+  ##
+  ## See also:
+  ## * `compileOption <#compileOption,string,string>`_ for enum options
+  ## * `defined <#defined,untyped>`_
+  ## * `std/compilesettings module <compilesettings.html>`_
+  ##
+  ## Example:
   ##
   ## .. code-block:: Nim
   ##   when compileOption("floatchecks"):
@@ -65,7 +72,14 @@ proc compileOption*(option: string): bool {.
 
 proc compileOption*(option, arg: string): bool {.
   magic: "CompileOptionArg", noSideEffect.}
-  ## Can be used to determine an enum compile-time option. Example:
+  ## Can be used to determine an enum compile-time option.
+  ##
+  ## See also:
+  ## * `compileOption <#compileOption,string>`_ for `on|off` options
+  ## * `defined <#defined,untyped>`_
+  ## * `std/compilesettings module <compilesettings.html>`_
+  ##
+  ## Example:
   ##
   ## .. code-block:: Nim
   ##   when compileOption("opt", "size") and compileOption("gc", "boehm"):
@@ -94,6 +108,11 @@ type
 proc defined*(x: untyped): bool {.magic: "Defined", noSideEffect, compileTime.}
   ## Special compile-time procedure that checks whether `x` is
   ## defined.
+  ##
+  ## See also:
+  ## * `compileOption <#compileOption,string>`_ for `on|off` options
+  ## * `compileOption <#compileOption,string,string>`_ for enum options
+  ## * `define pragmas <manual.html#implementation-specific-pragmas-compileminustime-define-pragmas>`_
   ##
   ## `x` is an external symbol introduced through the compiler's
   ## `-d:x switch <nimc.html#compiler-usage-compileminustime-symbols>`_ to enable
@@ -701,18 +720,24 @@ proc len*(x: string): int {.magic: "LengthStr", noSideEffect.}
   ##   var str = "Hello world!"
   ##   echo len(str) # => 12
 
-proc len*(x: cstring): int {.magic: "LengthStr", noSideEffect.}
-  ## Returns the length of a compatible string. This is sometimes
-  ## an O(n) operation.
+proc len*(x: cstring): int {.magic: "LengthStr", noSideEffect.} =
+  ## Returns the length of a compatible string. This is an O(n) operation except
+  ## in js at runtime.
   ##
   ## **Note:** On the JS backend this currently counts UTF-16 code points
   ## instead of bytes at runtime (not at compile time). For now, if you
   ## need the byte length of the UTF-8 encoding, convert to string with
   ## `$` first then call `len`.
-  ##
-  ## .. code-block:: Nim
-  ##   var str: cstring = "Hello world!"
-  ##   len(str) # => 12
+  runnableExamples:
+    doAssert len(cstring"abc") == 3
+    doAssert len(cstring r"ab\0c") == 5 # \0 is escaped
+    doAssert len(cstring"ab\0c") == 5 # ditto
+    var a: cstring = "ab\0c"
+    when defined(js): doAssert a.len == 4 # len ignores \0 for js
+    else: doAssert a.len == 2 # \0 is a null terminator
+    static:
+      var a2: cstring = "ab\0c"
+      doAssert a2.len == 2 # \0 is a null terminator, even in js vm
 
 proc len*(x: (type array)|array): int {.magic: "LengthArray", noSideEffect.}
   ## Returns the length of an array or an array type.
@@ -1078,7 +1103,6 @@ const
 const
   hasThreadSupport = compileOption("threads") and not defined(nimscript)
   hasSharedHeap = defined(boehmgc) or defined(gogc) # don't share heaps; every thread has its own
-  taintMode = compileOption("taintmode")
   nimEnableCovariance* = defined(nimEnableCovariance) # or true
 
 when hasThreadSupport and defined(tcc) and not compileOption("tlsEmulation"):
@@ -1101,22 +1125,8 @@ when defined(boehmgc):
     const boehmLib = "libgc.so.1"
   {.pragma: boehmGC, noconv, dynlib: boehmLib.}
 
-when taintMode:
-  type TaintedString* = distinct string ## A distinct string type that
-                                        ## is `tainted`:idx:, see `taint mode
-                                        ## <manual_experimental.html#taint-mode>`_
-                                        ## for details. It is an alias for
-                                        ## ``string`` if the taint mode is not
-                                        ## turned on.
+type TaintedString* {.deprecated: "Deprecated since 1.5".} = string
 
-  proc len*(s: TaintedString): int {.borrow.}
-else:
-  type TaintedString* = string          ## A distinct string type that
-                                        ## is `tainted`:idx:, see `taint mode
-                                        ## <manual_experimental.html#taint-mode>`_
-                                        ## for details. It is an alias for
-                                        ## ``string`` if the taint mode is not
-                                        ## turned on.
 
 when defined(profiler) and not defined(nimscript):
   proc nimProfile() {.compilerproc, noinline.}
@@ -1471,10 +1481,9 @@ proc addQuitProc*(quitProc: proc() {.noconv.}) {.
   ## basis (that is, the last function registered is the first to be executed).
   ## ``addQuitProc`` raises an EOutOfIndex exception if ``quitProc`` cannot be
   ## registered.
-
-# Support for addQuitProc() is done by Ansi C's facilities here.
-# In case of an unhandled exception the exit handlers should
-# not be called explicitly! The user may decide to do this manually though.
+  # Support for addQuitProc() is done by Ansi C's facilities here.
+  # In case of an unhandled exception the exit handlers should
+  # not be called explicitly! The user may decide to do this manually though.
 
 proc swap*[T](a, b: var T) {.magic: "Swap", noSideEffect.}
   ## Swaps the values `a` and `b`.
@@ -1508,7 +1517,7 @@ const
     ## Contains an IEEE floating point value of *Not A Number*.
     ##
     ## Note that you cannot compare a floating point value to this value
-    ## and expect a reasonable result - use the `classify` procedure
+    ## and expect a reasonable result - use the `isNaN` or `classify` procedure
     ## in the `math module <math.html>`_ for checking for NaN.
 
 
@@ -1522,10 +1531,26 @@ include "system/iterators_1"
 
 {.push stackTrace: off.}
 
-proc abs*(x: float64): float64 {.noSideEffect, inline.} =
-  if x < 0.0: -x else: x
-proc abs*(x: float32): float32 {.noSideEffect, inline.} =
-  if x < 0.0: -x else: x
+
+when defined(js):
+  proc js_abs[T: SomeNumber](x: T): T {.importc: "Math.abs".}
+else:
+  proc c_fabs(x: cdouble): cdouble {.importc: "fabs", header: "<math.h>".}
+  proc c_fabsf(x: cfloat): cfloat {.importc: "fabsf", header: "<math.h>".}
+
+proc abs*[T: float64 | float32](x: T): T {.noSideEffect, inline.} =
+  when nimvm:
+    if x < 0.0: result = -x
+    elif x == 0.0: result = 0.0 # handle 0.0, -0.0
+    else: result = x # handle NaN, > 0
+  else:
+    when defined(js): result = js_abs(x)
+    else:
+      when T is float64:
+        result = c_fabs(x)
+      else:
+        result = c_fabsf(x)
+
 proc min*(x, y: float32): float32 {.noSideEffect, inline.} =
   if x <= y or y != y: x else: y
 proc min*(x, y: float64): float64 {.noSideEffect, inline.} =
@@ -1553,11 +1578,8 @@ proc len*[U: Ordinal; V: Ordinal](x: HSlice[U, V]): int {.noSideEffect, inline.}
   ##   assert((5..2).len == 0)
   result = max(0, ord(x.b) - ord(x.a) + 1)
 
-when defined(nimNoNilSeqs2):
-  when not compileOption("nilseqs"):
-    {.pragma: nilError, error.}
-  else:
-    {.pragma: nilError.}
+when not compileOption("nilseqs"):
+  {.pragma: nilError, error.}
 else:
   {.pragma: nilError.}
 
@@ -1735,8 +1757,8 @@ proc compiles*(x: untyped): bool {.magic: "Compiles", noSideEffect, compileTime.
   discard
 
 when notJSnotNims:
-  import "system/ansi_c"
-  import "system/memory"
+  import system/ansi_c
+  import system/memory
 
 
 {.push stackTrace: off.}
@@ -2378,22 +2400,31 @@ when notJSnotNims:
   proc rawProc*[T: proc](x: T): pointer {.noSideEffect, inline.} =
     ## Retrieves the raw proc pointer of the closure `x`. This is
     ## useful for interfacing closures with C.
-    {.emit: """
-    `result` = `x`.ClP_0;
-    """.}
+    when T is "closure":
+      {.emit: """
+      `result` = `x`.ClP_0;
+      """.}
+    else:
+      {.error: "Only closure function and iterator are allowed!".}
 
   proc rawEnv*[T: proc](x: T): pointer {.noSideEffect, inline.} =
     ## Retrieves the raw environment pointer of the closure `x`. This is
     ## useful for interfacing closures with C.
-    {.emit: """
-    `result` = `x`.ClE_0;
-    """.}
+    when T is "closure":
+      {.emit: """
+      `result` = `x`.ClE_0;
+      """.}
+    else:
+      {.error: "Only closure function and iterator are allowed!".}
 
   proc finished*[T: proc](x: T): bool {.noSideEffect, inline.} =
-    ## can be used to determine if a first class iterator has finished.
-    {.emit: """
-    `result` = ((NI*) `x`.ClE_0)[1] < 0;
-    """.}
+    ## It can be used to determine if a first class iterator has finished.
+    when T is "iterator":
+      {.emit: """
+      `result` = ((NI*) `x`.ClE_0)[1] < 0;
+      """.}
+    else:
+      {.error: "Only closure iterator is allowed!".}
 
 when defined(js):
   include "system/jssys"
@@ -2483,7 +2514,7 @@ template `^^`(s, i: untyped): untyped =
 template `[]`*(s: string; i: int): char = arrGet(s, i)
 template `[]=`*(s: string; i: int; val: char) = arrPut(s, i, val)
 
-proc `[]`*[T, U](s: string, x: HSlice[T, U]): string {.inline.} =
+proc `[]`*[T, U: Ordinal](s: string, x: HSlice[T, U]): string {.inline.} =
   ## Slice operation for strings.
   ## Returns the inclusive range `[s[x.a], s[x.b]]`:
   ##
@@ -2495,7 +2526,7 @@ proc `[]`*[T, U](s: string, x: HSlice[T, U]): string {.inline.} =
   result = newString(L)
   for i in 0 ..< L: result[i] = s[i + a]
 
-proc `[]=`*[T, U](s: var string, x: HSlice[T, U], b: string) =
+proc `[]=`*[T, U: Ordinal](s: var string, x: HSlice[T, U], b: string) =
   ## Slice assignment for strings.
   ##
   ## If ``b.len`` is not exactly the number of elements that are referred to
@@ -2513,7 +2544,7 @@ proc `[]=`*[T, U](s: var string, x: HSlice[T, U], b: string) =
   else:
     spliceImpl(s, a, L, b)
 
-proc `[]`*[Idx, T, U, V](a: array[Idx, T], x: HSlice[U, V]): seq[T] =
+proc `[]`*[Idx, T; U, V: Ordinal](a: array[Idx, T], x: HSlice[U, V]): seq[T] =
   ## Slice operation for arrays.
   ## Returns the inclusive range `[a[x.a], a[x.b]]`:
   ##
@@ -2525,7 +2556,7 @@ proc `[]`*[Idx, T, U, V](a: array[Idx, T], x: HSlice[U, V]): seq[T] =
   result = newSeq[T](L)
   for i in 0..<L: result[i] = a[Idx(i + xa)]
 
-proc `[]=`*[Idx, T, U, V](a: var array[Idx, T], x: HSlice[U, V], b: openArray[T]) =
+proc `[]=`*[Idx, T; U, V: Ordinal](a: var array[Idx, T], x: HSlice[U, V], b: openArray[T]) =
   ## Slice assignment for arrays.
   ##
   ## .. code-block:: Nim
@@ -2539,7 +2570,7 @@ proc `[]=`*[Idx, T, U, V](a: var array[Idx, T], x: HSlice[U, V], b: openArray[T]
   else:
     sysFatal(RangeDefect, "different lengths for slice assignment")
 
-proc `[]`*[T, U, V](s: openArray[T], x: HSlice[U, V]): seq[T] =
+proc `[]`*[T; U, V: Ordinal](s: openArray[T], x: HSlice[U, V]): seq[T] =
   ## Slice operation for sequences.
   ## Returns the inclusive range `[s[x.a], s[x.b]]`:
   ##
@@ -2551,7 +2582,7 @@ proc `[]`*[T, U, V](s: openArray[T], x: HSlice[U, V]): seq[T] =
   newSeq(result, L)
   for i in 0 ..< L: result[i] = s[i + a]
 
-proc `[]=`*[T, U, V](s: var seq[T], x: HSlice[U, V], b: openArray[T]) =
+proc `[]=`*[T; U, V: Ordinal](s: var seq[T], x: HSlice[U, V], b: openArray[T]) =
   ## Slice assignment for sequences.
   ##
   ## If ``b.len`` is not exactly the number of elements that are referred to
@@ -2927,19 +2958,16 @@ proc `==`*(x, y: cstring): bool {.magic: "EqCString", noSideEffect,
   elif x.isNil or y.isNil: result = false
   else: result = strcmp(x, y) == 0
 
-when defined(nimNoNilSeqs2) and not compileOption("nilseqs"):
-  when defined(nimHasUserErrors):
-    # bug #9149; ensure that 'type(nil)' does not match *too* well by using 'type(nil) | type(nil)'.
-    # Eventually (in 0.20?) we will be able to remove this hack completely.
-    proc `==`*(x: string; y: type(nil) | type(nil)): bool {.
-        error: "'nil' is now invalid for 'string'; compile with --nilseqs:on for a migration period".} =
-      discard
-    proc `==`*(x: type(nil) | type(nil); y: string): bool {.
-        error: "'nil' is now invalid for 'string'; compile with --nilseqs:on for a migration period".} =
-      discard
-  else:
-    proc `==`*(x: string; y: type(nil) | type(nil)): bool {.error.} = discard
-    proc `==`*(x: type(nil) | type(nil); y: string): bool {.error.} = discard
+when not compileOption("nilseqs"):
+  # bug #9149; ensure that 'type(nil)' does not match *too* well by using 'type(nil) | type(nil)',
+  # especially for converters, see tests/overload/tconverter_to_string.nim
+  # Eventually we will be able to remove this hack completely.
+  proc `==`*(x: string; y: type(nil) | type(nil)): bool {.
+      error: "'nil' is now invalid for 'string'; compile with --nilseqs:on for a migration period".} =
+    discard
+  proc `==`*(x: type(nil) | type(nil); y: string): bool {.
+      error: "'nil' is now invalid for 'string'; compile with --nilseqs:on for a migration period".} =
+    discard
 
 template closureScope*(body: untyped): untyped =
   ## Useful when creating a closure in a loop to capture local loop variables by

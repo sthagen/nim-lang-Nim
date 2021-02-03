@@ -414,7 +414,7 @@ AST:
 Example code:
 
 .. code-block:: nim
-  macro genRepeatEcho(): stmt =
+  macro genRepeatEcho() =
     result = newNimNode(nnkStmtList)
 
     var forStmt = newNimNode(nnkForStmt) # generate a for statement
@@ -1033,7 +1033,7 @@ AST:
       nnkEmpty(), # no pragmas here
       nnkOfInherit(
         nnkIdent("RootObj") # inherits from RootObj
-      )
+      ),
       nnkEmpty()
     )
   )

@@ -13,6 +13,12 @@ from math import sqrt, ln, log10, log2, exp, round, arccos, arcsin,
   arctan, arctan2, cos, cosh, hypot, sinh, sin, tan, tanh, pow, trunc,
   floor, ceil, `mod`
 
+when declared(math.copySign):
+  from math import copySign
+
+when declared(math.signbit):
+  from math import signbit
+
 from os import getEnv, existsEnv, dirExists, fileExists, putEnv, walkDir, getAppFilename
 from md5 import getMD5
 from sighashes import symBodyDigest
@@ -46,6 +52,7 @@ template md5op(op) {.dirty.} =
 
 template wrap1f_math(op) {.dirty.} =
   proc `op Wrapper`(a: VmArgs) {.nimcall.} =
+    doAssert a.numArgs == 1
     setResult(a, op(getFloat(a, 0)))
   mathop op
 
@@ -151,7 +158,6 @@ proc registerAdditionalOps*(c: PCtx) =
   wrap1f_math(log10)
   wrap1f_math(log2)
   wrap1f_math(exp)
-  wrap1f_math(round)
   wrap1f_math(arccos)
   wrap1f_math(arcsin)
   wrap1f_math(arctan)
@@ -167,6 +173,19 @@ proc registerAdditionalOps*(c: PCtx) =
   wrap1f_math(trunc)
   wrap1f_math(floor)
   wrap1f_math(ceil)
+
+  when declared(copySign):
+    wrap2f_math(copySign)
+
+  when declared(signbit):
+    wrap1f_math(signbit)
+
+  registerCallback c, "stdlib.math.round", proc (a: VmArgs) {.nimcall.} =
+    let n = a.numArgs
+    case n
+    of 1: setResult(a, round(getFloat(a, 0)))
+    of 2: setResult(a, round(getFloat(a, 0), getInt(a, 1).int))
+    else: doAssert false, $n
 
   wrap1s(getMD5, md5op)
 
