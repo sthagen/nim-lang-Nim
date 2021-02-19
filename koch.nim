@@ -10,7 +10,7 @@
 #
 
 const
-  NimbleStableCommit = "324de9202fb3db82b266e7350731d1ec41013a2b" # master
+  NimbleStableCommit = "d13f3b8ce288b4dc8c34c219a4e050aaeaf43fc9" # master
   # examples of possible values: #head, #ea82b54, 1.2.3
   FusionStableHash = "#372ee4313827ef9f2ea388840f7d6b46c2b1b014"
   HeadHash = "#head"
@@ -526,7 +526,7 @@ proc runCI(cmd: string) =
   echo "runCI: ", cmd
   echo hostInfo()
   # boot without -d:nimHasLibFFI to make sure this still works
-  kochExecFold("Boot in release mode", "boot -d:release")
+  kochExecFold("Boot in release mode", "boot -d:release -d:nimStrictMode")
 
   ## build nimble early on to enable remainder to depend on it if needed
   kochExecFold("Build Nimble", "nimble")
@@ -549,7 +549,7 @@ proc runCI(cmd: string) =
     #[
     BUG: with initOptParser, `--batch:'' all` interprets `all` as the argument of --batch
     ]#
-    execFold("Run tester", "nim c -r -d:nimCoroutines --putenv:NIM_TESTAMENT_REMOTE_NETWORKING:1 testament/testament --batch:$1 all -d:nimCoroutines" % ["NIM_TESTAMENT_BATCH".getEnv("_")])
+    execFold("Run tester", "nim c -r -d:nimCoroutines --putenv:NIM_TESTAMENT_REMOTE_NETWORKING:1 -d:nimStrictMode testament/testament --batch:$1 all -d:nimCoroutines" % ["NIM_TESTAMENT_BATCH".getEnv("_")])
 
     block CT_FFI:
       when defined(posix): # windows can be handled in future PR's

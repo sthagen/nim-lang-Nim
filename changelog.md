@@ -75,8 +75,11 @@
 - `strscans.scanf` now supports parsing single characters.
 - `strscans.scanTuple` added which uses `strscans.scanf` internally, returning a tuple which can be unpacked for easier usage of `scanf`.
 
-- Added `setutils.toSet` that can take any iterable and convert it to a built-in set,
+- Added `setutils.toSet` that can take any iterable and convert it to a built-in `set`,
   if the iterable yields a built-in settable type.
+- Added `setutils.fullSet` which returns a full built-in `set` for a valid type.
+- Added `setutils.complement` which returns the complement of a built-in `set`.
+
 
 - Added `math.isNaN`.
 
@@ -113,9 +116,8 @@ with other backends. see #9125. Use `-d:nimLegacyJsRound` for previous behavior.
 
 - Added `sugar.dumpToString` which improves on `sugar.dump`.
 
-
-
 - Added `math.signbit`.
+
 
 - Removed the optional `longestMatch` parameter of the `critbits._WithPrefix` iterators (it never worked reliably)
 - In `lists`: renamed `append` to `add` and retained `append` as an alias;
@@ -147,6 +149,8 @@ provided by the operating system.
   issues like https://github.com/nim-lang/Nim/issues/13063 (which affected error messages)
   for modules importing `std/wrapnils`.
 
+- Added `math.frexp` overload procs. Deprecated `c_frexp`, use `frexp` instead.
+
 - `parseopt.initOptParser` has been made available and `parseopt` has been
   added back to `prelude` for all backends. Previously `initOptParser` was
   unavailable if the `os` module did not have `paramCount` or `paramStr`,
@@ -154,6 +158,14 @@ provided by the operating system.
   arguments passed to it, so `initOptParser` has been changed to raise
   `ValueError` when the real command line is not available. `parseopt` was
   previously excluded from `prelude` for JS, as it could not be imported.
+
+- On POSIX systems, the default signal handlers used for Nim programs (it's
+  used for printing the stacktrace on fatal signals) will now re-raise the
+  signal for the OS default handlers to handle.
+
+  This lets the OS perform its default actions, which might include core
+  dumping (on select signals) and notifying the parent process about the cause
+  of termination.
 
 ## Language changes
 
@@ -199,6 +211,8 @@ provided by the operating system.
 - docgen: rst files can now use single backticks instead of double backticks and correctly render
   in both rst2html (as before) as well as common tools rendering rst directly (e.g. github), by
   adding: `default-role:: code` directive inside the rst file, which is now handled by rst2html.
+
+- Added `-d:nimStrictMode` in CI in several places to ensure code doesn't have certain hints/warnings
 
 ## Tool changes
 

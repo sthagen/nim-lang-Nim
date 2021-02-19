@@ -12,7 +12,7 @@
 ## working with directories, running shell commands, etc.
 ##
 ## .. code-block::
-##   import os
+##   import std/os
 ##
 ##   let myFile = "/path/to/my/file.nim"
 ##
@@ -41,11 +41,10 @@
 ## * `dynlib module <dynlib.html>`_
 ## * `streams module <streams.html>`_
 
-include "system/inclrtl"
+include system/inclrtl
 import std/private/since
 
-import
-  strutils, pathnorm
+import std/[strutils, pathnorm]
 
 const weirdTarget = defined(nimscript) or defined(js)
 
@@ -66,16 +65,16 @@ since (1, 1):
 when weirdTarget:
   discard
 elif defined(windows):
-  import winlean, times
+  import std/[winlean, times]
 elif defined(posix):
-  import posix, times
+  import std/[posix, times]
 
   proc toTime(ts: Timespec): times.Time {.inline.} =
     result = initTime(ts.tv_sec.int64, ts.tv_nsec.int)
 else:
   {.error: "OS module not ported to your operating system!".}
 
-when weirdTarget and defined(nimErrorProcCanHaveBody):
+when weirdTarget:
   {.pragma: noWeirdTarget, error: "this proc is not available on the NimScript/js target".}
 else:
   {.pragma: noWeirdTarget.}
@@ -930,15 +929,40 @@ proc getConfigDir*(): string {.rtl, extern: "nos$1",
     result = getEnv("XDG_CONFIG_HOME", getEnv("HOME") / ".config")
   result.normalizePathEnd(trailingSep = true)
 
+
+when defined(windows):
+  type DWORD = uint32
+
+  proc getTempPath(
+    nBufferLength: DWORD, lpBuffer: WideCString
+  ): DWORD {.stdcall, dynlib: "kernel32.dll", importc: "GetTempPathW".} =
+    ## Retrieves the path of the directory designated for temporary files.
+
+template getEnvImpl(result: var string, tempDirList: openArray[string]) =
+  for dir in tempDirList:
+    if existsEnv(dir):
+      result = getEnv(dir)
+      break
+
+template getTempDirImpl(result: var string) =
+  when defined(windows):
+    getEnvImpl(result, ["TMP", "TEMP", "USERPROFILE"])
+  else:
+    getEnvImpl(result, ["TMPDIR", "TEMP", "TMP", "TEMPDIR"])
+
 proc getTempDir*(): string {.rtl, extern: "nos$1",
   tags: [ReadEnvEffect, ReadIOEffect].} =
   ## Returns the temporary directory of the current user for applications to
   ## save temporary files in.
   ##
-  ## **Please do not use this**: On Android, it currently
-  ## returns ``getHomeDir()``, and on other Unix based systems it can cause
-  ## security problems too. That said, you can override this implementation
-  ## by adding ``-d:tempDir=mytempname`` to your compiler invocation.
+  ## On Windows, it calls [GetTempPath](https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-gettemppathw).
+  ## On Posix based platforms, it will check `TMPDIR`, `TEMP`, `TMP` and `TEMPDIR` environment variables in order.
+  ## On all platforms, `/tmp` will be returned if the procs fails.
+  ##
+  ## You can override this implementation
+  ## by adding `-d:tempDir=mytempname` to your compiler invocation.
+  ## 
+  ## **Note:** This proc does not check whether the returned path exists.
   ##
   ## See also:
   ## * `getHomeDir proc <#getHomeDir>`_
@@ -947,14 +971,25 @@ proc getTempDir*(): string {.rtl, extern: "nos$1",
   ## * `getCurrentDir proc <#getCurrentDir>`_
   ## * `setCurrentDir proc <#setCurrentDir,string>`_
   const tempDirDefault = "/tmp"
-  result = tempDirDefault
   when defined(tempDir):
     const tempDir {.strdefine.}: string = tempDirDefault
     result = tempDir
-  elif defined(windows): result = getEnv("TEMP")
-  elif defined(android): result = getHomeDir()
   else:
-    if existsEnv("TMPDIR"): result = getEnv("TMPDIR")
+    when nimvm:
+      getTempDirImpl(result)
+    else:
+      when defined(windows):
+        let size = getTempPath(0, nil)
+        # If the function fails, the return value is zero.
+        if size > 0:
+          let buffer = newWideCString(size.int)
+          if getTempPath(size, buffer) > 0:
+            result = $buffer
+      elif defined(android): result = "/data/local/tmp"
+      else:
+        getTempDirImpl(result)
+    if result.len == 0:
+      result = tempDirDefault
   normalizePathEnd(result, trailingSep=true)
 
 proc expandTilde*(path: string): string {.
@@ -1060,14 +1095,16 @@ when defined(windows) or defined(posix) or defined(nintendoswitch):
       result.add quoteShell(args[i])
 
 when not weirdTarget:
-  proc c_rename(oldname, newname: cstring): cint {.
-    importc: "rename", header: "<stdio.h>".}
   proc c_system(cmd: cstring): cint {.
     importc: "system", header: "<stdlib.h>".}
-  proc c_strlen(a: cstring): cint {.
-    importc: "strlen", header: "<string.h>", noSideEffect.}
-  proc c_free(p: pointer) {.
-    importc: "free", header: "<stdlib.h>".}
+
+  when not defined(windows):
+    proc c_rename(oldname, newname: cstring): cint {.
+      importc: "rename", header: "<stdio.h>".}
+    proc c_strlen(a: cstring): cint {.
+      importc: "strlen", header: "<string.h>", noSideEffect.}
+    proc c_free(p: pointer) {.
+      importc: "free", header: "<stdlib.h>".}
 
 
 when defined(windows) and not weirdTarget:
@@ -1158,8 +1195,11 @@ proc symlinkExists*(link: string): bool {.rtl, extern: "nos$1",
     var res: Stat
     return lstat(link, res) >= 0'i32 and S_ISLNK(res.st_mode)
 
+
+when not defined(windows):
+  const maxSymlinkLen = 1024
+
 const
-  maxSymlinkLen = 1024
   ExeExts* = ## Platform specific file extension for executables.
     ## On Windows ``["exe", "cmd", "bat"]``, on Posix ``[""]``.
     when defined(windows): ["exe", "cmd", "bat"] else: [""]
@@ -1401,7 +1441,7 @@ proc absolutePathInternal(path: string): string =
 proc normalizeExe*(file: var string) {.since: (1, 3, 5).} =
   ## on posix, prepends `./` if `file` doesn't contain `/` and is not `"", ".", ".."`.
   runnableExamples:
-    import sugar
+    import std/sugar
     when defined(posix):
       doAssert "foo".dup(normalizeExe) == "./foo"
       doAssert "foo/../bar".dup(normalizeExe) == "foo/../bar"
@@ -2227,10 +2267,7 @@ iterator walkDir*(dir: string; relative = false, checkDir = false):
         while true:
           var x = readdir(d)
           if x == nil: break
-          when defined(nimNoArrayToCstringConversion):
-            var y = $cstring(addr x.d_name)
-          else:
-            var y = $x.d_name.cstring
+          var y = $cstring(addr x.d_name)
           if y != "." and y != "..":
             var s: Stat
             let path = dir / y
@@ -2759,12 +2796,12 @@ when defined(nimdoc):
     ## Returns the `i`-th `command line argument`:idx: given to the application.
     ##
     ## `i` should be in the range `1..paramCount()`, the `IndexDefect`
-    ## exception will be raised for invalid values.  Instead of iterating over
-    ## `paramCount() <#paramCount>`_ with this proc you can call the
-    ## convenience `commandLineParams() <#commandLineParams>`_.
+    ## exception will be raised for invalid values. Instead of iterating
+    ## over `paramCount() <#paramCount>`_ with this proc you can 
+    ## call the convenience `commandLineParams() <#commandLineParams>`_.
     ##
     ## Similarly to `argv`:idx: in C,
-    ## it is possible to call ``paramStr(0)`` but this will return OS specific
+    ## it is possible to call `paramStr(0)` but this will return OS specific
     ## contents (usually the name of the invoked executable). You should avoid
     ## this and call `getAppFilename() <#getAppFilename>`_ instead.
     ##
@@ -2788,7 +2825,22 @@ when defined(nimdoc):
     ##     # Do something else!
 
 elif defined(nimscript): discard
-elif defined(nintendoswitch) or weirdTarget:
+elif defined(nodejs):
+  type Argv = object of JSRoot
+  let argv {.importjs: "process.argv".} : Argv
+  proc len(argv: Argv): int {.importjs: "#.length".}
+  proc `[]`(argv: Argv, i: int): cstring {.importjs: "#[#]".}
+
+  proc paramCount*(): int {.tags: [ReadDirEffect].} =
+    result = argv.len - 2
+
+  proc paramStr*(i: int): string {.tags: [ReadIOEffect].} =
+    let i = i + 1
+    if i < argv.len and i >= 0:
+      result = $argv[i]
+    else:
+      raise newException(IndexDefect, formatErrorIndexBound(i - 1, argv.len - 2))
+elif defined(nintendoswitch):
   proc paramStr*(i: int): string {.tags: [ReadIOEffect].} =
     raise newException(OSError, "paramStr is not implemented on Nintendo Switch")
 
@@ -2818,8 +2870,10 @@ elif defined(windows):
     if not ownParsedArgv:
       ownArgv = parseCmdLine($getCommandLine())
       ownParsedArgv = true
-    if i < ownArgv.len and i >= 0: return ownArgv[i]
-    raise newException(IndexDefect, formatErrorIndexBound(i, ownArgv.len-1))
+    if i < ownArgv.len and i >= 0:
+      result = ownArgv[i]
+    else:
+      raise newException(IndexDefect, formatErrorIndexBound(i, ownArgv.len-1))
 
 elif defined(genode):
   proc paramStr*(i: int): string =
@@ -2827,7 +2881,12 @@ elif defined(genode):
 
   proc paramCount*(): int =
     raise newException(OSError, "paramCount is not implemented on Genode")
+elif weirdTarget:
+  proc paramStr*(i: int): string {.tags: [ReadIOEffect].} =
+    raise newException(OSError, "paramStr is not implemented on current platform")
 
+  proc paramCount*(): int {.tags: [ReadIOEffect].} =
+    raise newException(OSError, "paramCount is not implemented on current platform")
 elif not defined(createNimRtl) and
   not(defined(posix) and appType == "lib"):
   # On Posix, there is no portable way to get the command line from a DLL.
@@ -2837,8 +2896,10 @@ elif not defined(createNimRtl) and
 
   proc paramStr*(i: int): string {.tags: [ReadIOEffect].} =
     # Docstring in nimdoc block.
-    if i < cmdCount and i >= 0: return $cmdLine[i]
-    raise newException(IndexDefect, formatErrorIndexBound(i, cmdCount-1))
+    if i < cmdCount and i >= 0:
+      result = $cmdLine[i]
+    else:
+      raise newException(IndexDefect, formatErrorIndexBound(i, cmdCount-1))
 
   proc paramCount*(): int {.tags: [ReadIOEffect].} =
     # Docstring in nimdoc block.
