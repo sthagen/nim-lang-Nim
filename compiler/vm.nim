@@ -415,7 +415,8 @@ proc opConv(c: PCtx; dest: var TFullReg, src: TFullReg, desttyp, srctyp: PType):
     else:
       internalError(c.config, "cannot convert to string " & desttyp.typeToString)
   else:
-    case skipTypes(desttyp, abstractVarRange).kind
+    let desttyp = skipTypes(desttyp, abstractVarRange)
+    case desttyp.kind
     of tyInt..tyInt64:
       dest.ensureKind(rkInt)
       case skipTypes(srctyp, abstractRange).kind
@@ -2226,6 +2227,12 @@ proc prepareVMValue(arg: PNode): PNode =
 
   # Early abort without copy. No transformation takes place.
   if arg.kind in nkLiterals:
+    return arg
+
+  if arg.kind == nkExprColonExpr and arg[0].typ != nil and
+     arg[0].typ.sym != nil and arg[0].typ.sym.magic == mPNimrodNode:
+    # Poor mans way of protecting static NimNodes
+    # XXX: Maybe we need a nkNimNode?
     return arg
 
   result = copyNode(arg)

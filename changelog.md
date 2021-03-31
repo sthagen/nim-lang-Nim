@@ -47,6 +47,8 @@
 - Added an overload for the `collect` macro that inferes the container type based
   on the syntax of the last expression. Works with std seqs, tables and sets.
 
+- `jsonutils` now handles `cstring` (including as Table key).
+
 - Added `randState` template that exposes the default random number generator.
   Useful for library authors.
 
@@ -70,6 +72,8 @@
 
 - Added `asyncdispatch.activeDescriptors` that returns the number of currently
   active async event handles/file descriptors.
+
+- Added to `asynchttpserver` `getPort` and `getSocket`.
 
 - `--gc:orc` is now 10% faster than previously for common workloads. If
   you have trouble with its changed behavior, compile with `-d:nimOldOrc`.
@@ -246,6 +250,8 @@
 
 - Added dollar `$` and `len` for `jsre.RegExp`.
 
+- Added `hasDataBuffered` to `asyncnet`.
+
 - Added `hasClosure` to `std/typetraits`.
 
 
@@ -271,6 +277,9 @@
   This implies that edge cases like `-128'i8` finally work correctly.
 
 - Custom numeric literals (e.g. `-128'bignum`) are now supported.
+
+- Tuple expressions are now parsed consistently as
+  `nnkTupleConstr` node. Will affect macros expecting nodes to be of `nnkPar`.
 
 
 ## Compiler changes
