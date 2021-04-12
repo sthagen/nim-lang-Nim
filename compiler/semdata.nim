@@ -54,7 +54,7 @@ type
     inst*: PInstantiation
 
   TExprFlag* = enum
-    efLValue, efWantIterator, efInTypeof,
+    efLValue, efWantIterator, efWantIterable, efInTypeof,
     efNeedStatic,
       # Use this in contexts where a static value is mandatory
     efPreferStatic,
@@ -341,6 +341,9 @@ proc addConverter*(c: PContext, conv: LazySym) =
   assert conv.sym != nil
   if inclSym(c.converters, conv.sym):
     add(c.graph.ifaces[c.module.position].converters, conv)
+
+proc addConverterDef*(c: PContext, conv: LazySym) =
+  addConverter(c, conv)
   if c.config.symbolFiles != disabledSf:
     addConverter(c.encoder, c.packedRepr, conv.sym)
 
