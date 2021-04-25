@@ -57,6 +57,8 @@
 - The unary slice `..b` was removed, use `0..b` instead or use `-d:nimLegacyUnarySlice`
   for a deprecation period.
 
+- Moved `.travis.yml`, `appveyor.yml.disabled`, `.github/workflows/ci.yml.disabled` to `unmaintained/`.
+
 ## Standard library additions and changes
 - Added support for parenthesized expressions in `strformat`
 
@@ -331,6 +333,8 @@
 - Added a new module `std/importutils`, and an API `privateAccess`, which allows access to private fields
   for an object type in the current scope.
 
+- `typeof(voidStmt)` now works and returns `void`.
+
 ## Compiler changes
 
 - Added `--declaredlocs` to show symbol declaration location in messages.
@@ -342,6 +346,8 @@
 - Added `--spellSuggest` to show spelling suggestions on typos.
 
 - Added `--filenames:abs|canonical|magic` which replaces --listFullPaths:on|off
+
+- Added `--processing:dots|filenames|off` which customizes `hintProcessing`
 
 - Source+Edit links now appear on top of every docgen'd page when
   `nim doc --git.url:url ...` is given.
@@ -371,7 +377,16 @@
 
 - `--hint:CC` now goes to stderr (like all other hints) instead of stdout.
 
+- json build instructions are now generated in `$nimcache/outFileBasename.json`
+  instead of `$nimcache/projectName.json`. This allows avoiding recompiling a given project
+  compiled with different options if the output file differs.
 
+- `--usenimcache` (implied by `nim r main`) now generates an output file that includes a hash of
+  some of the compilation options, which allows caching generated binaries:
+  nim r main # recompiles
+  nim r -d:foo main # recompiles
+  nim r main # uses cached binary
+  nim r main arg1 arg2 # ditto (runtime arguments are irrelevant)
 
 ## Tool changes
 
