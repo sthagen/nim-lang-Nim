@@ -363,7 +363,7 @@ contain the following `escape sequences`:idx:\ :
   ``\\``                   `backslash`:idx:
   ``\"``                   `quotation mark`:idx:
   ``\'``                   `apostrophe`:idx:
-  ``\\`` '0'..'9'+         `character with decimal value d`:idx:;
+  ``\`` '0'..'9'+         `character with decimal value d`:idx:;
                            all decimal digits directly
                            following are used for the character
   ``\a``                   `alert`:idx:
@@ -459,7 +459,7 @@ Character literals are enclosed in single quotes `''` and can contain the
 same escape sequences as strings - with one exception: the platform
 dependent `newline`:idx: (``\p``)
 is not allowed as it may be wider than one character (it can be the pair
-CR/LF).  Here are the valid `escape sequences`:idx: for character
+CR/LF). Here are the valid `escape sequences`:idx: for character
 literals:
 
 ==================         ===================================================
@@ -473,7 +473,7 @@ literals:
   ``\\``                   `backslash`:idx:
   ``\"``                   `quotation mark`:idx:
   ``\'``                   `apostrophe`:idx:
-  ``\\`` '0'..'9'+         `character with decimal value d`:idx:;
+  ``\`` '0'..'9'+          `character with decimal value d`:idx:;
                            all decimal digits directly
                            following are used for the character
   ``\a``                   `alert`:idx:
@@ -1843,7 +1843,7 @@ untraced references are *unsafe*. However, for certain low-level operations
 (accessing the hardware) untraced references are unavoidable.
 
 Traced references are declared with the **ref** keyword, untraced references
-are declared with the **ptr** keyword.  In general, a `ptr T` is implicitly
+are declared with the **ptr** keyword. In general, a `ptr T` is implicitly
 convertible to the `pointer` type.
 
 An empty subscript `[]` notation can be used to de-refer a reference,
@@ -2255,7 +2255,7 @@ conversions from `string` to `SQL` are allowed:
 
   db.query("SELECT FROM users WHERE name = '$1'".SQL % [username])
 
-Now we have compile-time checking against SQL injection attacks.  Since
+Now we have compile-time checking against SQL injection attacks. Since
 `"".SQL` is transformed to `SQL("")` no new syntax is needed for nice
 looking `SQL` string literals. The hypothetical `SQL` type actually
 exists in the library as the `SqlQuery type <db_common.html#SqlQuery>`_ of
@@ -2981,11 +2981,13 @@ Example:
 
 .. code-block:: nim
 
-  case readline(stdin)
+  let line = readline(stdin)
+  case line
   of "delete-everything", "restart-computer":
     echo "permission denied"
   of "go-for-a-walk":     echo "please yourself"
-  else:                   echo "unknown command"
+  elif line.len == 0:     echo "empty" # optional, must come after `of` branches
+  else:                   echo "unknown command" # ditto
 
   # indentation of the branches is also allowed; and so is an optional colon
   # after the selecting expression:
@@ -2996,19 +2998,23 @@ Example:
     else:                   echo "unknown command"
 
 
-The `case` statement is similar to the if statement, but it represents
+The `case` statement is similar to the `if` statement, but it represents
 a multi-branch selection. The expression after the keyword `case` is
 evaluated and if its value is in a *slicelist* the corresponding statements
 (after the `of` keyword) are executed. If the value is not in any
-given *slicelist* the `else` part is executed. If there is no `else`
-part and not all possible values that `expr` can hold occur in a
-*slicelist*, a static error occurs. This holds only for expressions of
-ordinal types. "All possible values" of `expr` are determined by `expr`'s
-type. To suppress the static error an `else` part with an
-empty `discard` statement should be used.
+given *slicelist*, trailing `elif` and `else` parts are executed using same
+semantics as for `if` statement, and `elif` is handled just like `else: if`.
+If there are no `else` or `elif` parts and not
+all possible values that `expr` can hold occur in a *slicelist*, a static error occurs.
+This holds only for expressions of ordinal types.
+"All possible values" of `expr` are determined by `expr`'s type.
+To suppress the static error an `else: discard` should be used.
 
 For non-ordinal types, it is not possible to list every possible value and so
 these always require an `else` part.
+An exception to this rule is for the `string` type, which currently doesn't
+require a trailing `else` or `elif` branch; it's unspecified whether this will
+keep working in future versions.
 
 Because case statements are checked for exhaustiveness during semantic analysis,
 the value in every `of` branch must be a constant expression.
@@ -3054,15 +3060,15 @@ won't work:
   var foo = Foo(x: @[])
   foo.get_x().add("asd")
 
-This can be fixed by explicitly using `return`:
+This can be fixed by explicitly using `result` or `return`:
 
 .. code-block:: nim
   proc get_x(x: Foo): var seq[string] =
     case true
     of true:
-      return x.x
+      result = x.x
     else:
-      return x.x
+      result = x.x
 
 
 When statement
@@ -4252,7 +4258,7 @@ Closure iterators and inline iterators have some restrictions:
 5. Closure iterators are not supported by the JS backend.
 
 (*) Closure iterators can be co-recursive with a factory proc which results
-in similar syntax to a recursive iterator.  More details follow.
+in similar syntax to a recursive iterator. More details follow.
 
 Iterators that are neither marked `{.closure.}` nor `{.inline.}` explicitly
 default to being inline, but this may change in future versions of the
@@ -4366,12 +4372,12 @@ The call can be made more like an inline iterator with a for loop macro:
     echo f
 
 Because of full backend function call aparatus involvment, closure iterator
-invocation is typically higher cost than inline iterators.  Adornment by
+invocation is typically higher cost than inline iterators. Adornment by
 a macro wrapper at the call site like this is a possibly useful reminder.
 
-The factory `proc`, as an ordinary procedure, can be recursive.  The
+The factory `proc`, as an ordinary procedure, can be recursive. The
 above macro allows such recursion to look much like a recursive iterator
-would.  For example:
+would. For example:
 
 .. code-block:: nim
   proc recCountDown(n: int): iterator(): int =
@@ -7094,7 +7100,7 @@ Similar to the `importc pragma for C
 <#foreign-function-interface-importc-pragma>`_, the
 `importcpp` pragma can be used to import `C++`:idx: methods or C++ symbols
 in general. The generated code then uses the C++ method calling
-syntax: `obj->method(arg)`:cpp:.  In combination with the `header` and `emit`
+syntax: `obj->method(arg)`:cpp:. In combination with the `header` and `emit`
 pragmas this allows *sloppy* interfacing with libraries written in C++:
 
 .. code-block:: Nim
@@ -7327,7 +7333,7 @@ ImportObjC pragma
 -----------------
 Similar to the `importc pragma for C
 <#foreign-function-interface-importc-pragma>`_, the `importobjc` pragma can
-be used to import `Objective C`:idx: methods.  The generated code then uses the
+be used to import `Objective C`:idx: methods. The generated code then uses the
 Objective C method calling syntax: ``[obj method param1: arg]``.
 In addition with the `header` and `emit` pragmas this
 allows *sloppy* interfacing with libraries written in Objective C:
@@ -7656,7 +7662,7 @@ Exportc pragma
 --------------
 The `exportc` pragma provides a means to export a type, a variable, or a
 procedure to C. Enums and constants can't be exported. The optional argument
-is a string containing the C identifier.  If the argument is missing, the C
+is a string containing the C identifier. If the argument is missing, the C
 name is the Nim identifier *exactly as spelled*:
 
 .. code-block:: Nim
@@ -7825,7 +7831,7 @@ Threads
 
 To enable thread support the `--threads:on`:option: command-line switch needs to
 be used. The system_ module then contains several threading primitives.
-See the `threads <threads.html>`_ and `channels <channels.html>`_ modules
+See the `threads <threads.html>`_ and `channels <channels_builtin.html>`_ modules
 for the low-level thread API. There are also high-level parallelism constructs
 available. See `spawn <manual_experimental.html#parallel-amp-spawn>`_ for
 further details.
