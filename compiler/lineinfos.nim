@@ -27,18 +27,22 @@ proc createDocLink*(urlSuffix: string): string =
 
 type
   TMsgKind* = enum
-    errUnknown, errInternal, errIllFormedAstX, errCannotOpenFile,
+    # fatal errors
+    errUnknown, errFatal, errInternal,
+    # non-fatal errors
+    errIllFormedAstX, errCannotOpenFile,
     errXExpected,
     errGridTableNotImplemented,
     errMarkdownIllformedTable,
     errGeneralParseError,
     errNewSectionExpected,
     errInvalidDirectiveX,
+    errInvalidRstField,
     errFootnoteMismatch,
     errProveInit, # deadcode
     errGenerated,
     errUser,
-
+    # warnings
     warnCannotOpenFile = "CannotOpenFile", warnOctalEscape = "OctalEscape",
     warnXIsNeverRead = "XIsNeverRead", warnXmightNotBeenInit = "XmightNotBeenInit",
     warnDeprecated = "Deprecated", warnConfigDeprecated = "ConfigDeprecated",
@@ -64,8 +68,8 @@ type
     warnCannotOpen = "CannotOpen",
     warnFileChanged = "FileChanged",
     warnUser = "User",
-
-    hintSuccess = "Success", hintSuccessX = "SuccessX", hintBuildMode = "BuildMode",
+    # hints
+    hintSuccess = "Success", hintSuccessX = "SuccessX",
     hintCC = "CC",
     hintLineTooLong = "LineTooLong", hintXDeclaredButNotUsed = "XDeclaredButNotUsed",
     hintXCannotRaiseY = "XCannotRaiseY", hintConvToBaseNotNeeded = "ConvToBaseNotNeeded",
@@ -83,6 +87,7 @@ type
 const
   MsgKindToStr*: array[TMsgKind, string] = [
     errUnknown: "unknown error",
+    errFatal: "fatal error: $1",
     errInternal: "internal error: $1",
     errIllFormedAstX: "illformed AST: $1",
     errCannotOpenFile: "cannot open '$1'",
@@ -92,6 +97,7 @@ const
     errGeneralParseError: "general parse error",
     errNewSectionExpected: "new section expected $1",
     errInvalidDirectiveX: "invalid directive: '$1'",
+    errInvalidRstField: "invalid field: $1",
     errFootnoteMismatch: "number of footnotes and their references don't match: $1",
     errProveInit: "Cannot prove that '$1' is initialized.",  # deadcode
     errGenerated: "$1",
@@ -145,8 +151,7 @@ const
     warnUser: "$1",
     hintSuccess: "operation successful: $#",
     # keep in sync with `testament.isSuccess`
-    hintSuccessX: "$loc lines; ${sec}s; $mem; proj: $project; out: $output",
-    hintBuildMode: "$1",
+    hintSuccessX: "$build\n$loc lines; ${sec}s; $mem; proj: $project; out: $output",
     hintCC: "CC: $1",
     hintLineTooLong: "line too long",
     hintXDeclaredButNotUsed: "'$1' is declared but not used",
@@ -181,8 +186,7 @@ const
   ]
 
 const
-  fatalMin* = errUnknown
-  fatalMax* = errInternal
+  fatalMsgs* = {errUnknown..errInternal}
   errMin* = errUnknown
   errMax* = errUser
   warnMin* = warnCannotOpenFile
@@ -200,7 +204,7 @@ proc computeNotesVerbosity(): array[0..3, TNoteKinds] =
   result[1] = result[2] - {warnProveField, warnProveIndex,
     warnGcUnsafe, hintPath, hintDependency, hintCodeBegin, hintCodeEnd,
     hintSource, hintGlobalVar, hintGCStats, hintMsgOrigin, hintPerformance}
-  result[0] = result[1] - {hintSuccessX, hintBuildMode, hintSuccess, hintConf,
+  result[0] = result[1] - {hintSuccessX, hintSuccess, hintConf,
     hintProcessing, hintPattern, hintExecuting, hintLinking, hintCC}
 
 const
