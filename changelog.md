@@ -346,6 +346,9 @@
 
 - Added `dom.setInterval`, `dom.clearInterval` overloads.
 
+- Deprecated `sequtils.delete` and added an overload taking a `Slice` that raises a defect
+  if the slice is out of bounds.
+
 ## Language changes
 
 - `nimscript` now handles `except Exception as e`.
@@ -390,6 +393,9 @@
 
 - The `gc:orc` algorithm was refined so that custom container types can participate in the
   cycle collection process.
+
+- On embedded devices `malloc` can now be used instead of `mmap` via `-d:nimAllocPagesViaMalloc`.
+  This is only supported for `--gc:orc` or `--gc:arc`.
 
 
 ## Compiler changes
