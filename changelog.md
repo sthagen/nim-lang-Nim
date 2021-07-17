@@ -6,7 +6,8 @@
 
 - Deprecated `std/mersenne`
 
--  `cuchar` now aliases `uint8` instead of `char`
+- `cuchar` is now deprecated as it aliased `char` where arguably it should have aliased `uint8`.
+  Please use `char` or `uint8` instead.
 
 - `repr` now doesn't insert trailing newline; previous behavior was very inconsistent,
   see #16034. Use `-d:nimLegacyReprWithNewline` for previous behavior.
@@ -75,9 +76,6 @@
 - `json` and `jsonutils` now serialize NaN, Inf, -Inf as strings, so that
   `%[NaN, -Inf]` is the string `["nan","-inf"]` instead of `[nan,-inf]` which was invalid json.
 
-- `system.addFloat` now uses the "Dragonbox" algorithm, which ensures correct roundtrips of floating point
-  numbers, that the minimum length representation of a floating point number is used and correct rounding.
-  Use `-d:nimLegacyAddFloat` for a transition period.
 
 - `strformat` is now part of `include std/prelude`.
 
@@ -101,6 +99,12 @@
   added support for parenthesized expressions.
   added support for const string's instead of just string literals
 
+
+- `system.addFloat` and `system.$` now can produce string representations of floating point numbers
+  that are minimal in size and that "roundtrip" (via the "Dragonbox" algorithm). This currently has
+  to be enabled via `-d:nimFpRoundtrips`. It is expected that this behavior becomes the new default
+  in upcoming versions.
+
 - Fixed buffer overflow bugs in `net`
 
 - Exported `sslHandle` from `net` and `asyncnet`.
@@ -114,8 +118,6 @@
   from `https://curl.se/ca/cacert.pem`. Besides
   the OpenSSL DLLs (e.g. libssl-1_1-x64.dll, libcrypto-1_1-x64.dll) you
   now also need to ship `cacert.pem` with your `.exe` file.
-
-- Make `{.requiresInit.}` pragma to work for `distinct` types.
 
 - `typetraits`:
   `distinctBase` now is identity instead of error for non distinct types.
@@ -465,7 +467,6 @@
   enforces that every symbol is written as it was declared, not enforcing
   the official Nim style guide. To be enabled, this has to be combined either
   with `--styleCheck:error` or `--styleCheck:hint`.
-
 
 
 ## Tool changes
