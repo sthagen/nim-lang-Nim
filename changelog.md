@@ -39,9 +39,6 @@
   underlying code is also updated the same way.
 - Custom pragma values have now an API for use in macros.
 
-- In `std/os`, `getHomeDir`, `expandTilde`, `getTempDir`, `getConfigDir` now do not include trailing `DirSep`,
-  unless `-d:nimLegacyHomeDir` is specified (for a transition period).
-
 - On POSIX systems, the default signal handlers used for Nim programs (it's
   used for printing the stacktrace on fatal signals) will now re-raise the
   signal for the OS default handlers to handle.
@@ -349,7 +346,7 @@
 - Added `dom.setInterval`, `dom.clearInterval` overloads.
 
 - Deprecated `sequtils.delete` and added an overload taking a `Slice` that raises a defect
-  if the slice is out of bounds.
+  if the slice is out of bounds, likewise with `strutils.delete`.
 
 ## Language changes
 
