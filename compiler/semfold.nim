@@ -144,7 +144,7 @@ proc evalOp(m: TMagic, n, a, b, c: PNode; idgen: IdGenerator; g: ModuleGraph): P
       if a.typ.kind == tyString:
         result = newIntNodeT(toInt128(a.strVal.len), n, idgen, g)
       elif a.typ.kind == tyCstring:
-        result = newIntNodeT(toInt128(nimCStrLen(a.strVal)), n, idgen, g)
+        result = newIntNodeT(toInt128(nimCStrLen(a.strVal.cstring)), n, idgen, g)
     else:
       result = newIntNodeT(toInt128(a.len), n, idgen, g)
   of mUnaryPlusI, mUnaryPlusF64: result = a # throw `+` away
@@ -290,6 +290,7 @@ proc evalOp(m: TMagic, n, a, b, c: PNode; idgen: IdGenerator; g: ModuleGraph): P
   of mBoolToStr:
     if getOrdValue(a) == 0: result = newStrNodeT("false", n, g)
     else: result = newStrNodeT("true", n, g)
+  of mFloatToStr: result = newStrNodeT($getFloat(a), n, g)
   of mCStrToStr, mCharToStr:
     if a.kind == nkBracket:
       var s = ""

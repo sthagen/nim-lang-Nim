@@ -43,32 +43,6 @@ proc hashString(s: string): int {.compilerproc.} =
   h = h + h shl 15
   result = cast[int](h)
 
-proc addInt*(result: var string; x: int64) =
-  ## Converts integer to its string representation and appends it to `result`.
-  ##
-  ## .. code-block:: Nim
-  ##   var
-  ##     a = "123"
-  ##     b = 45
-  ##   a.addInt(b) # a <- "12345"
-  var num: uint64
-
-  if x < 0:
-    if x == low(int64):
-      num = uint64(x)
-    else:
-      num = uint64(-x)
-    let base = result.len
-    setLen(result, base + 1)
-    result[base] = '-'
-  else:
-    num = uint64(x)
-  addIntImpl(result, num)
-
-proc nimIntToStr(x: int): string {.compilerRtl.} =
-  result = newStringOfCap(sizeof(x)*4)
-  result.addInt x
-
 proc c_strtod(buf: cstring, endptr: ptr cstring): float64 {.
   importc: "strtod", header: "<stdlib.h>", noSideEffect.}
 
@@ -211,15 +185,16 @@ proc nimParseBiggestFloat(s: string, number: var BiggestFloat,
   var ti = 0
   let maxlen = t.high - "e+000".len # reserve enough space for exponent
 
-  result = i - start
+  let endPos = i
+  result = endPos - start
   i = start
   # re-parse without error checking, any error should be handled by the code above.
-  if i < s.len and s[i] == '.': i.inc
-  while i < s.len and s[i] in {'0'..'9','+','-'}:
+  if i < endPos and s[i] == '.': i.inc
+  while i < endPos and s[i] in {'0'..'9','+','-'}:
     if ti < maxlen:
       t[ti] = s[i]; inc(ti)
     inc(i)
-    while i < s.len and s[i] in {'.', '_'}: # skip underscore and decimal point
+    while i < endPos and s[i] in {'.', '_'}: # skip underscore and decimal point
       inc(i)
 
   # insert exponent
@@ -238,10 +213,6 @@ proc nimParseBiggestFloat(s: string, number: var BiggestFloat,
 
 when defined(nimHasInvariant):
   {.pop.} # staticBoundChecks
-
-proc nimInt64ToStr(x: int64): string {.compilerRtl.} =
-  result = newStringOfCap(sizeof(x)*4)
-  result.addInt x
 
 proc nimBoolToStr(x: bool): string {.compilerRtl.} =
   return if x: "true" else: "false"

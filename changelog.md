@@ -104,6 +104,10 @@
 - In `std/dom`, `Interval` is now a `ref object`, same as `Timeout`. Definitions of `setTimeout`,
   `clearTimeout`, `setInterval`, `clearInterval` were updated.
 
+- With `-d:nimPreviewDotLikeOps` (default in devel), dot-like operators (operators starting with `.`, but not with `..`)
+  now have the same precedence as `.`, so that `a.?b.c` is now parsed as `(a.?b).c` instead of `a.?(b.c)`.
+  A warning is generated when a dot-like operator is used without `-d:nimPreviewDotLikeOps`.
+
 - The allocator for Nintendo Switch, which was nonfunctional because
   of breaking changes in libnx, was removed, in favour of the new `-d:nimAllocPagesViaMalloc` option.
 
@@ -147,6 +151,8 @@
 - Added `almostEqual` in `math` for comparing two float values using a machine epsilon.
 
 - Added `clamp` in `math` which allows using a `Slice` to clamp to a value.
+
+- Added `ceilDiv` in `math` for round up integer division.
 
 - The JSON module can now handle integer literals and floating point literals of
   arbitrary length and precision.
@@ -484,6 +490,9 @@
 
 - `nim r` now supports cross compilation from unix to windows when specifying `-d:mingw` by using wine,
   e.g.: `nim r --eval:'import os; echo "a" / "b"'` prints `a\b`
+
+- `nim` can compile version 1.4.0 as follows: `nim c --lib:lib --stylecheck:off -d:nimVersion140 compiler/nim`.
+  `-d:nimVersion140` is not needed for bootstrapping, only for building 1.4.0 from devel.
 
 - The style checking of the compiler now supports a `--styleCheck:usages` switch. This switch
   enforces that every symbol is written as it was declared, not enforcing
