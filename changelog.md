@@ -64,7 +64,8 @@
   for previous behavior.
 
 - `hashes.hash` can now support `object` and `ref` (can be overloaded in user code),
-  if `-d:nimEnableHashRef` is used.
+  if `-d:nimPreviewHashRef` is used. It is expected that this behavior
+  becomes the new default in upcoming versions.
 
 - `hashes.hash(proc|ptr|ref|pointer)` now calls `hash(int)` and honors `-d:nimIntHash1`,
   `hashes.hash(closure)` has also been improved.
@@ -103,7 +104,7 @@
 - In `std/dom`, `Interval` is now a `ref object`, same as `Timeout`. Definitions of `setTimeout`,
   `clearTimeout`, `setInterval`, `clearInterval` were updated.
 
-- With `-d:nimPreviewDotLikeOps` (default in devel), dot-like operators (operators starting with `.`, but not with `..`)
+- With `-d:nimPreviewDotLikeOps`, dot-like operators (operators starting with `.`, but not with `..`)
   now have the same precedence as `.`, so that `a.?b.c` is now parsed as `(a.?b).c` instead of `a.?(b.c)`.
   A warning is generated when a dot-like operator is used without `-d:nimPreviewDotLikeOps`.
 
