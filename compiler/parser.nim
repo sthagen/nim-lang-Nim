@@ -1146,7 +1146,7 @@ proc isExprStart(p: Parser): bool =
   of tkSymbol, tkAccent, tkOpr, tkNot, tkNil, tkCast, tkIf, tkFor,
      tkProc, tkFunc, tkIterator, tkBind, tkBuiltInMagics,
      tkParLe, tkBracketLe, tkCurlyLe, tkIntLit..tkCustomLit, tkVar, tkRef, tkPtr,
-     tkTuple, tkObject, tkWhen, tkCase, tkOut:
+     tkTuple, tkObject, tkWhen, tkCase, tkOut, tkTry, tkBlock:
     result = true
   else: result = false
 
@@ -1877,7 +1877,7 @@ proc parseEnum(p: var Parser): PNode =
 
     var symPragma = a
     var pragma: PNode
-    if p.tok.tokType == tkCurlyDotLe:
+    if (p.tok.indent < 0 or p.tok.indent >= p.currInd) and p.tok.tokType == tkCurlyDotLe:
       pragma = optPragmas(p)
       symPragma = newNodeP(nkPragmaExpr, p)
       symPragma.add(a)

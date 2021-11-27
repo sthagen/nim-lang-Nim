@@ -43,7 +43,7 @@ written as:
       dealloc(x.data)
 
   proc `=trace`[T](x: var myseq[T]; env: pointer) =
-    # `=trace` allows the cycle collector `--gc:orc`
+    # `=trace` allows the cycle collector `--mm:orc`
     # to understand how to trace the object graph.
     if x.data != nil:
       for i in 0..<x.len: `=trace`(x.data[i], env)
@@ -101,7 +101,7 @@ The memory management for Nim's standard `string` and `seq` types as
 well as other standard collections is performed via so-called
 "Lifetime-tracking hooks", which are particular `type bound operators <manual.html#procedures-type-bound-operators>`_.
 
-There are 3 different hooks for each (generic or concrete) object type `T` (`T` can also be a
+There are 4 different hooks for each (generic or concrete) object type `T` (`T` can also be a
 `distinct` type) that are called implicitly by the compiler.
 
 (Note: The word "hook" here does not imply any kind of dynamic binding
@@ -208,7 +208,7 @@ by the compiler. Notice that there is no `=` before the `{.error.}` pragma.
 `=trace` hook
 -------------
 
-A custom **container** type can support Nim's cycle collector `--gc:orc` via
+A custom **container** type can support Nim's cycle collector `--mm:orc` via
 the `=trace` hook. If the container does not implement `=trace`, cyclic data
 structures which are constructed with the help of the container might leak
 memory or resources, but memory safety is not compromised.
@@ -224,7 +224,7 @@ to calls of the built-in `=trace` operation.
 
 Usually there will only be a need for a custom `=trace` when a custom `=destroy` that deallocates
 manually allocated resources is also used, and then only when there is a chance of cyclic
-references from items within the manually allocated resources when it is desired that `--gc:orc`
+references from items within the manually allocated resources when it is desired that `--mm:orc`
 is able to break and collect these cyclic referenced resources. Currently however, there is a
 mutual use problem in that whichever of `=destroy`/`=trace` is used first will automatically
 create a version of the other which will then conflict with the creation of the second of the
@@ -256,7 +256,7 @@ The general pattern in using `=destroy` with `=trace` looks like:
 
   # following may be other custom "hooks" as required...
 
-**Note**: The `=trace` hooks (which are only used by `--gc:orc`) are currently more experimental and less refined
+**Note**: The `=trace` hooks (which are only used by `--mm:orc`) are currently more experimental and less refined
 than the other hooks.
 
 
@@ -555,14 +555,14 @@ for expressions of type `lent T` or of type `var T`.
     echo t[0] # accessor does not copy the element!
 
 
-The .cursor annotation
-======================
+The cursor pragma
+=================
 
-Under the `--gc:arc|orc`:option: modes Nim's `ref` type is implemented
+Under the `--mm:arc|orc`:option: modes Nim's `ref` type is implemented
 via the same runtime "hooks" and thus via reference counting.
 This means that cyclic structures cannot be freed
-immediately (`--gc:orc`:option: ships with a cycle collector).
-With the `.cursor` annotation one can break up cycles declaratively:
+immediately (`--mm:orc`:option: ships with a cycle collector).
+With the `cursor` pragma one can break up cycles declaratively:
 
 .. code-block:: nim
 
@@ -575,7 +575,7 @@ But please notice that this is not C++'s weak_ptr, it means the right field is n
 involved in the reference counting, it is a raw pointer without runtime checks.
 
 Automatic reference counting also has the disadvantage that it introduces overhead
-when iterating over linked structures. The `.cursor` annotation can also be used
+when iterating over linked structures. The `cursor` pragma can also be used
 to avoid this overhead:
 
 .. code-block:: nim
@@ -586,10 +586,10 @@ to avoid this overhead:
     it = it.next
 
 
-In fact, `.cursor` more generally prevents object construction/destruction pairs
+In fact, `cursor` more generally prevents object construction/destruction pairs
 and so can also be useful in other contexts. The alternative solution would be to
 use raw pointers (`ptr`) instead which is more cumbersome and also more dangerous
-for Nim's evolution: Later on, the compiler can try to prove `.cursor` annotations
+for Nim's evolution: Later on, the compiler can try to prove `cursor` pragmas
 to be safe, but for `ptr` the compiler has to remain silent about possible
 problems.
 
@@ -597,7 +597,7 @@ problems.
 Cursor inference / copy elision
 ===============================
 
-The current implementation also performs `.cursor` inference. Cursor inference is
+The current implementation also performs `cursor` inference. Cursor inference is
 a form of copy elision.
 
 To see how and when we can do that, think about this question: In `dest = src` when
@@ -612,7 +612,7 @@ indirections:
 .. code-block:: nim
 
   proc main(tab: Table[string, string]) =
-    let v = tab["key"] # inferred as .cursor because 'tab' is not mutated.
+    let v = tab["key"] # inferred as cursor because 'tab' is not mutated.
     # no copy into 'v', no destruction of 'v'.
     use(v)
     useItAgain(v)
@@ -653,7 +653,7 @@ The ability to override a hook leads to a phase ordering problem:
     discard
 
 
-The solution is to define `proc `=destroy`[T](f: var Foo[T])` before
+The solution is to define ``proc `=destroy`[T](f: var Foo[T])`` before
 it is used. The compiler generates implicit
 hooks for all types in *strategic places* so that an explicitly provided
 hook that comes too "late" can be detected reliably. These *strategic places*

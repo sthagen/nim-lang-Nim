@@ -85,12 +85,14 @@ runnableExamples("-r:off"):
 
 import std/private/since
 
-import nativesockets, os, strutils, times, sets, options, std/monotimes
+import nativesockets
+import os, strutils, times, sets, options, std/monotimes
 import ssl_config
 export nativesockets.Port, nativesockets.`$`, nativesockets.`==`
 export Domain, SockType, Protocol
 
 const useWinVersion = defined(windows) or defined(nimdoc)
+const useNimNetLite = defined(nimNetLite) or defined(freertos) or defined(zephyr)
 const defineSsl = defined(ssl) or defined(nimdoc)
 
 when useWinVersion:
@@ -476,14 +478,14 @@ proc toSockAddr*(address: IpAddress, port: Port, sa: var Sockaddr_storage,
     sl = sizeof(Sockaddr_in).SockLen
     let s = cast[ptr Sockaddr_in](addr sa)
     s.sin_family = typeof(s.sin_family)(toInt(AF_INET))
-    s.sin_port = port
+    s.sin_port = htons(port)
     copyMem(addr s.sin_addr, unsafeAddr address.address_v4[0],
             sizeof(s.sin_addr))
   of IpAddressFamily.IPv6:
     sl = sizeof(Sockaddr_in6).SockLen
     let s = cast[ptr Sockaddr_in6](addr sa)
     s.sin6_family = typeof(s.sin6_family)(toInt(AF_INET6))
-    s.sin6_port = port
+    s.sin6_port = htons(port)
     copyMem(addr s.sin6_addr, unsafeAddr address.address_v6[0],
             sizeof(s.sin6_addr))
 
@@ -1243,11 +1245,12 @@ proc getLocalAddr*(socket: Socket): (string, Port) =
   ## This is high-level interface for `getsockname`:idx:.
   getLocalAddr(socket.fd, socket.domain)
 
-proc getPeerAddr*(socket: Socket): (string, Port) =
-  ## Get the socket's peer address and port number.
-  ##
-  ## This is high-level interface for `getpeername`:idx:.
-  getPeerAddr(socket.fd, socket.domain)
+when not useNimNetLite:
+  proc getPeerAddr*(socket: Socket): (string, Port) =
+    ## Get the socket's peer address and port number.
+    ##
+    ## This is high-level interface for `getpeername`:idx:.
+    getPeerAddr(socket.fd, socket.domain)
 
 proc setSockOpt*(socket: Socket, opt: SOBool, value: bool,
     level = SOL_SOCKET) {.tags: [WriteIOEffect].} =
@@ -1259,7 +1262,7 @@ proc setSockOpt*(socket: Socket, opt: SOBool, value: bool,
   var valuei = cint(if value: 1 else: 0)
   setSockOptInt(socket.fd, cint(level), toCInt(opt), valuei)
 
-when defined(posix) or defined(nimdoc):
+when defined(nimdoc) or (defined(posix) and not useNimNetLite):
   proc connectUnix*(socket: Socket, path: string) =
     ## Connects to Unix socket on `path`.
     ## This only works on Unix-style systems: Mac OS X, BSD and Linux

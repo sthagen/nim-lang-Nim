@@ -1044,7 +1044,8 @@ proc rawExecute(c: PCtx, start: int, tos: PStackFrame): TFullReg =
                                      strictSymEquality=true))
     of opcSameNodeType:
       decodeBC(rkInt)
-      regs[ra].intVal = ord(regs[rb].node.typ.sameTypeOrNil regs[rc].node.typ)
+      regs[ra].intVal = ord(regs[rb].node.typ.sameTypeOrNil(regs[rc].node.typ, {ExactTypeDescValues, ExactGenericParams}))
+      # The types should exactly match which is why we pass `{ExactTypeDescValues..ExactGcSafety}`.
     of opcXor:
       decodeBC(rkInt)
       regs[ra].intVal = ord(regs[rb].intVal != regs[rc].intVal)
@@ -1747,11 +1748,10 @@ proc rawExecute(c: PCtx, start: int, tos: PStackFrame): TFullReg =
       elif instr.opcode == opcNHint:
         message(c.config, info, hintUser, a.strVal)
     of opcParseExprToAst:
-      decodeB(rkNode)
-      # c.debug[pc].line.int - countLines(regs[rb].strVal) ?
+      decodeBC(rkNode)
       var error: string
       let ast = parseString(regs[rb].node.strVal, c.cache, c.config,
-                            toFullPath(c.config, c.debug[pc]), c.debug[pc].line.int,
+                            regs[rc].node.strVal, 0,
                             proc (conf: ConfigRef; info: TLineInfo; msg: TMsgKind; arg: string) {.nosinks.} =
                               if error.len == 0 and msg <= errMax:
                                 error = formatMsg(conf, info, msg, arg))
@@ -1763,10 +1763,10 @@ proc rawExecute(c: PCtx, start: int, tos: PStackFrame): TFullReg =
       else:
         regs[ra].node = ast[0]
     of opcParseStmtToAst:
-      decodeB(rkNode)
+      decodeBC(rkNode)
       var error: string
       let ast = parseString(regs[rb].node.strVal, c.cache, c.config,
-                            toFullPath(c.config, c.debug[pc]), c.debug[pc].line.int,
+                            regs[rc].node.strVal, 0,
                             proc (conf: ConfigRef; info: TLineInfo; msg: TMsgKind; arg: string) {.nosinks.} =
                               if error.len == 0 and msg <= errMax:
                                 error = formatMsg(conf, info, msg, arg))
@@ -2161,6 +2161,11 @@ proc evalExpr*(c: PCtx, n: PNode): PNode =
 proc getGlobalValue*(c: PCtx; s: PSym): PNode =
   internalAssert c.config, s.kind in {skLet, skVar} and sfGlobal in s.flags
   result = c.globals[s.position-1]
+
+proc setGlobalValue*(c: PCtx; s: PSym, val: PNode) =
+  ## Does not do type checking so ensure the `val` matches the `s.typ`
+  internalAssert c.config, s.kind in {skLet, skVar} and sfGlobal in s.flags
+  c.globals[s.position-1] = val
 
 include vmops
 

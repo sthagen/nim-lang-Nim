@@ -214,7 +214,7 @@ proc openArrayLoc(p: BProc, formalType: PType, n: PNode): Rope =
   else:
     var a: TLoc
     initLocExpr(p, if n.kind == nkHiddenStdConv: n[1] else: n, a)
-    case skipTypes(a.t, abstractVar).kind
+    case skipTypes(a.t, abstractVar+{tyStatic}).kind
     of tyOpenArray, tyVarargs:
       if reifiedOpenArray(n):
         if a.t.kind in {tyVar, tyLent}:
@@ -801,6 +801,5 @@ proc genAsgnCall(p: BProc, le, ri: PNode, d: var TLoc) =
     genNamedParamCall(p, ri, d)
   else:
     genPrefixCall(p, le, ri, d)
-  postStmtActions(p)
 
 proc genCall(p: BProc, e: PNode, d: var TLoc) = genAsgnCall(p, nil, e, d)

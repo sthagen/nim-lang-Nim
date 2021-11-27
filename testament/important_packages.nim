@@ -55,7 +55,7 @@ pkg "chronos", "nim c -r -d:release tests/testall", allowFailure = true # pendin
 pkg "cligen", "nim c --path:. -r cligen.nim"
 pkg "combparser", "nimble test --gc:orc"
 pkg "compactdict"
-pkg "comprehension", "nimble test", "https://github.com/alehander42/comprehension"
+pkg "comprehension", "nimble test", "https://github.com/alehander92/comprehension"
 pkg "criterion", allowFailure = true # pending https://github.com/disruptek/criterion/issues/3 (wrongly closed)
 pkg "datamancer"
 pkg "dashing", "nim c tests/functional.nim"
@@ -115,7 +115,7 @@ pkg "nimterop", "nimble minitest"
 pkg "nimwc", "nim c nimwc.nim"
 pkg "nimx", "nim c --threads:on test/main.nim", allowFailure = true
 pkg "nitter", "nim c src/nitter.nim", "https://github.com/zedeus/nitter"
-pkg "norm", "nim c -r tests/sqlite/trows.nim"
+pkg "norm", "testament r tests/sqlite/trows.nim"
 pkg "npeg", "nimble testarc"
 pkg "numericalnim", "nim c -r tests/test_integrate.nim"
 pkg "optionsutils"
