@@ -1838,7 +1838,7 @@ A small example:
 cast uncheckedAssign
 --------------------
 
-Some restrictions for case objects can be disabled via a `{.cast(unsafeAssign).}` section:
+Some restrictions for case objects can be disabled via a `{.cast(uncheckedAssign).}` section:
 
 .. code-block:: nim
     :test: "nim c $1"
@@ -3834,10 +3834,10 @@ The proc expression represented by the `do` block is appended to the routine
 call as the last argument. In calls using the command syntax, the `do` block
 will bind to the immediately preceding expression rather than the command call.
 
-`do` with a parameter list corresponds to an anonymous `proc`, however
-`do` without parameters is treated as a normal statement list. This allows
-macros to receive both indented statement lists as an argument in inline
-calls, as well as a direct mirror of Nim's routine syntax.
+`do` with a parameter list or pragma list corresponds to an anonymous `proc`,
+however `do` without parameters or pragmas is treated as a normal statement
+list. This allows macros to receive both indented statement lists as an
+argument in inline calls, as well as a direct mirror of Nim's routine syntax.
 
 .. code-block:: nim
   # Passing a statement list to an inline macro:

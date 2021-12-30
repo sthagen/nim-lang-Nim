@@ -11,10 +11,17 @@
   or define your own `Math.trunc` polyfill using the [`emit` pragma](https://nim-lang.org/docs/manual.html#implementation-specific-pragmas-emit-pragma). Nim uses
   `Math.trunc` for the division and modulo operators for integers.
 
+- Optional parameters in combination with `: body` syntax (RFC #405) are now opt-in via
+  `experimental:flexibleOptionalParams`.
+
+- `std/sharedstrings` module is removed.
+- Constants `colors.colPaleVioletRed` and `colors.colMediumPurple` changed to match the CSS color standard.
+
 ## Standard library additions and changes
 
 - `macros.parseExpr` and `macros.parseStmt` now accept an optional
   filename argument for more informative errors.
+- Module `colors` expanded with missing colors from the CSS color standard.
 
 ## `std/smtp`
 
@@ -66,3 +73,9 @@
 - The `gc` switch has been renamed to `mm` ("memory management") in order to reflect the
   reality better. (Nim moved away from all techniques based on "tracing".)
 
+- Nim now supports Nimble version 0.14 which added support for lock-files. This is done by
+  a simple configuration change setting that you can do yourself too. In `$nim/config/nim.cfg`
+  replace `pkgs` by `pkgs2`.
+
+- There is a new switch `--nimMainPrefix:prefix` to influence the `NimMain` that the
+  compiler produces. This is particularly useful for generating static libraries.
