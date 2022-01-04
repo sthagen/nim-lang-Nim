@@ -27,6 +27,12 @@
 
 - Sends `ehlo` first. If the mail server does not understand, it sends `helo` as a fallback.
 
+- Added `IsoWeekRange`, a range type to represent the number of weeks in an ISO week-based year.
+- Added `IsoYear`, a distinct int type to prevent bugs from confusing the week-based year and the regular year.
+- Added `initDateTime` in `times` to create a datetime from a weekday, and ISO 8601 week number and week-based year.
+- Added `getIsoWeekAndYear` in `times` to get an ISO week number along with the corresponding ISO week-based year from a datetime.
+- Added `getIsoWeeksInYear` in `times` to return the number of weeks in an ISO week-based year.
+
 ## Language changes
 
 - Pragma macros on type definitions can now return `nnkTypeSection` nodes as well as `nnkTypeDef`,
@@ -61,6 +67,9 @@
   ```
 - [Case statement macros](manual.html#macros-case-statement-macros) are no longer experimental,
   meaning you no longer need to enable the experimental switch `caseStmtMacros` to use them.
+- Full command syntax and block arguments i.e. `foo a, b: c` are now allowed
+  for the right-hand side of type definitions in type sections. Previously
+  they would error with "invalid indentation".
 
 ## Compiler changes
 
