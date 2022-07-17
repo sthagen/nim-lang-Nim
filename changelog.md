@@ -39,6 +39,7 @@ becomes an alias for `addr`.
 - `std/smtp` sends `ehlo` first. If the mail server does not understand, it sends `helo` as a fallback.
 - Changed mimedb to use an `OrderedTable` instead of `OrderedTableRef`, to use it in a const.
 - `strutils.find` now use and default to `last=-1` for whole string searches, making limiting it to just the first char (`last=0`) valid.
+- `random.rand` now works with `Ordinal`s.
 
 [//]: # "Additions:"
 - Added `IsoWeekRange`, a range type to represent the number of weeks in an ISO week-based year.
@@ -108,6 +109,8 @@ becomes an alias for `addr`.
 - `defined` now accepts identifiers separated by dots, i.e. `defined(a.b.c)`.
   In the command line, this is defined as `-d:a.b.c`. Older versions can
   use accents as in ``defined(`a.b.c`)`` to access such defines.
+
+- Defines the `gcRefc` symbol which allows writing specific code for the refc GC.
 
 ## Compiler changes
 
