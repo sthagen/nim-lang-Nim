@@ -1055,30 +1055,30 @@ proc newStringOfCap*(cap: Natural): string {.
   ## be achieved with the `&` operator or with `add`.
 
 proc `&`*(x: string, y: char): string {.
-  magic: "ConStrStr", noSideEffect, merge.}
+  magic: "ConStrStr", noSideEffect.}
   ## Concatenates `x` with `y`.
   ##
   ## .. code-block:: Nim
   ##   assert("ab" & 'c' == "abc")
 proc `&`*(x, y: char): string {.
-  magic: "ConStrStr", noSideEffect, merge.}
+  magic: "ConStrStr", noSideEffect.}
   ## Concatenates characters `x` and `y` into a string.
   ##
   ## .. code-block:: Nim
   ##   assert('a' & 'b' == "ab")
 proc `&`*(x, y: string): string {.
-  magic: "ConStrStr", noSideEffect, merge.}
+  magic: "ConStrStr", noSideEffect.}
   ## Concatenates strings `x` and `y`.
   ##
   ## .. code-block:: Nim
   ##   assert("ab" & "cd" == "abcd")
 proc `&`*(x: char, y: string): string {.
-  magic: "ConStrStr", noSideEffect, merge.}
+  magic: "ConStrStr", noSideEffect.}
   ## Concatenates `x` with `y`.
   ##
   ## .. code-block:: Nim
   ##   assert('a' & "bc" == "abc")
-
+  
 # implementation note: These must all have the same magic value "ConStrStr" so
 # that the merge optimization works properly.
 
@@ -1614,13 +1614,23 @@ proc isNil*[T: proc](x: T): bool {.noSideEffect, magic: "IsNil".}
   ## `== nil`.
 
 
-proc `@`*[T](a: openArray[T]): seq[T] =
-  ## Turns an *openArray* into a sequence.
-  ##
-  ## This is not as efficient as turning a fixed length array into a sequence
-  ## as it always copies every element of `a`.
-  newSeq(result, a.len)
-  for i in 0..a.len-1: result[i] = a[i]
+when defined(nimHasTopDownInference):
+  # magic used for seq type inference
+  proc `@`*[T](a: openArray[T]): seq[T] {.magic: "OpenArrayToSeq".} =
+    ## Turns an *openArray* into a sequence.
+    ##
+    ## This is not as efficient as turning a fixed length array into a sequence
+    ## as it always copies every element of `a`.
+    newSeq(result, a.len)
+    for i in 0..a.len-1: result[i] = a[i]
+else:
+  proc `@`*[T](a: openArray[T]): seq[T] =
+    ## Turns an *openArray* into a sequence.
+    ##
+    ## This is not as efficient as turning a fixed length array into a sequence
+    ## as it always copies every element of `a`.
+    newSeq(result, a.len)
+    for i in 0..a.len-1: result[i] = a[i]
 
 
 when defined(nimSeqsV2):
@@ -3137,6 +3147,8 @@ when not defined(nimPreviewSlimSystem):
   {.deprecated: "io is about to move out of system; use `-d:nimPreviewSlimSystem` and import `std/syncio`".}
   import std/syncio
   export syncio
+else:
+  import std/syncio
 
 when not defined(createNimHcr) and not defined(nimscript):
   include nimhcr

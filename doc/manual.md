@@ -790,9 +790,11 @@ of a call or whether it is parsed as a tuple constructor:
 
   ```nim
   echo(1, 2) # pass 1 and 2 to echo
+  ```
 
   ```nim
   echo (1, 2) # pass the tuple (1, 2) to echo
+  ```
 
 Dot-like operators
 ------------------
@@ -2394,9 +2396,8 @@ If `A` is a subtype of `B` and `A` and `B` are `object` types then:
 - `ref A` is a subtype of `ref B`
 - `ptr A` is a subtype of `ptr B`.
 
-**Note**: In later versions of the language the subtype relation might
-be changed to *require* the pointer indirection in order to prevent
-"object slicing".
+**Note**: One of the above pointer-indirections is required for assignment from
+a subtype to its parent type to prevent "object slicing".
 
 
 Convertible relation
@@ -7048,6 +7049,22 @@ immediate pragma
 The immediate pragma is obsolete. See `Typed vs untyped parameters
 <#templates-typed-vs-untyped-parameters>`_.
 
+redefine pragma
+---------------
+
+Redefinition of template symbols with the same signature is allowed.
+This can be made explicit with the `redefine` pragma:
+
+```nim
+template foo: int = 1
+echo foo() # 1
+template foo: int {.redefine.} = 2
+echo foo() # 2
+# warning: implicit redefinition of template
+template foo: int = 3
+```
+
+This is mostly intended for macro generated code. 
 
 compilation option pragmas
 --------------------------
@@ -8318,8 +8335,7 @@ violations of the `no heap sharing restriction`:idx:\: This restriction implies
 that it is invalid to construct a data structure that consists of memory
 allocated from different (thread-local) heaps.
 
-A thread proc is passed to `createThread` or `spawn` and invoked
-indirectly; so the `thread` pragma implies `procvar`.
+A thread proc can be passed to `createThread` or `spawn`.
 
 
 
