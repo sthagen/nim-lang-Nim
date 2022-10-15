@@ -46,6 +46,8 @@
 - Optional parameters in combination with `: body` syntax (RFC #405) are now opt-in via
   `experimental:flexibleOptionalParams`.
 
+- Automatic dereferencing (experimental feature) is removed.
+
 - The `Math.trunc` polyfill for targeting Internet Explorer was
   previously included in most JavaScript output files.
   Now, it is only included with `-d:nimJsMathTruncPolyfill`.
@@ -82,8 +84,16 @@
 - `macros.getImpl` for `const` symbols now returns the full definition node
   (as `nnkConstDef`) rather than the AST of the constant value.
 
+- Lock levels are deprecated, now a noop.
+
 - ORC is now the default memory management strategy. Use
   `--mm:refc` for a transition period.
+
+- `strictEffects` are no longer experimental.
+  Use `legacy:laxEffects` to keep backward compatibility.
+
+- The `gorge`/`staticExec` calls will now return a descriptive message in the output
+  if the execution fails for whatever reason. To get back legacy behaviour use `-d:nimLegacyGorgeErrors`.
 
 ## Standard library additions and changes
 
@@ -101,8 +111,7 @@
   making limiting it to just the first char (`last = 0`) valid.
 - `random.rand` now works with `Ordinal`s.
 - Undeprecated `os.isvalidfilename`.
-- `std/oids` now uses `int64` to store time internally (before it was int32), the length of
-  the string form of `Oid` changes from 24 to 32.
+- `std/oids` now uses `int64` to store time internally (before it was int32).
 
 [//]: # "Additions:"
 - Added ISO 8601 week date utilities in `times`:
@@ -129,6 +138,8 @@
 [//]: # "Deprecations:"
 - Deprecated `selfExe` for Nimscript.
 - Deprecated `std/sums`.
+- Deprecated `std/base64.encode` for collections of arbitrary integer element type.
+  Now only `byte` and `char` are supported.
 
 [//]: # "Removals:"
 - Removed deprecated module `parseopt2`.
@@ -215,7 +226,7 @@
 - `nim` can now compile version 1.4.0 as follows: `nim c --lib:lib --stylecheck:off compiler/nim`,
   without requiring `-d:nimVersion140` which is now a noop.
 
-- `--styleCheck`, `--hintAsError` and `--warningAsError` now only applies to the current package.
+- `--styleCheck`, `--hintAsError` and `--warningAsError` now only apply to the current package.
 
 - The switch `--nimMainPrefix:prefix` has been added to add a prefix to the names of `NimMain` and
   related functions produced on the backend. This prevents conflicts with other Nim
