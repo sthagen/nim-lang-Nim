@@ -259,10 +259,15 @@ proc listGcUnsafety(s: PSym; onlyWarning: bool; cycleCheck: var IntSet; conf: Co
     of routineKinds:
       # recursive call *always* produces only a warning so the full error
       # message is printed:
-      listGcUnsafety(u, true, cycleCheck, conf)
-      message(conf, s.info, msgKind,
-        "'$#' is not GC-safe as it calls '$#'" %
-        [s.name.s, u.name.s])
+      if u.kind == skMethod and {sfBase, sfThread} * u.flags == {sfBase}:
+        message(conf, u.info, msgKind,
+          "Base method '$#' requires explicit '{.gcsafe.}' to be GC-safe" %
+          [u.name.s])
+      else:
+        listGcUnsafety(u, true, cycleCheck, conf)
+        message(conf, s.info, msgKind,
+          "'$#' is not GC-safe as it calls '$#'" %
+          [s.name.s, u.name.s])
     of skParam, skForVar:
       message(conf, s.info, msgKind,
         "'$#' is not GC-safe as it performs an indirect call via '$#'" %
@@ -660,7 +665,7 @@ proc trackCase(tracked: PEffects, n: PNode) =
   let stringCase = n[0].typ != nil and skipTypes(n[0].typ,
         abstractVarRange-{tyTypeDesc}).kind in {tyFloat..tyFloat128, tyString, tyCstring}
   let interesting = not stringCase and interestingCaseExpr(n[0]) and
-        tracked.config.hasWarn(warnProveField)
+        (tracked.config.hasWarn(warnProveField) or strictCaseObjects in tracked.c.features)
   var inter: TIntersection = @[]
   var toCover = 0
   for i in 1..<n.len:
@@ -836,6 +841,9 @@ proc trackCall(tracked: PEffects; n: PNode) =
         discard
       var effectList = op.n[0]
       if a.kind == nkSym and a.sym.kind == skMethod:
+        if {sfBase, sfThread} * a.sym.flags == {sfBase}:
+          if tracked.config.hasWarn(warnGcUnsafe): warnAboutGcUnsafe(n, tracked.config)
+          markGcUnsafe(tracked, a)
         propagateEffects(tracked, n, a.sym)
       elif isNoEffectList(effectList):
         if isForwardedProc(a):
@@ -1041,11 +1049,11 @@ proc track(tracked: PEffects, n: PNode) =
     for i in 0..<n.len: track(tracked, n[i])
   of nkCheckedFieldExpr:
     track(tracked, n[0])
-    if tracked.config.hasWarn(warnProveField):
-      checkFieldAccess(tracked.guards, n, tracked.config)
+    if tracked.config.hasWarn(warnProveField) or strictCaseObjects in tracked.c.features:
+      checkFieldAccess(tracked.guards, n, tracked.config, strictCaseObjects in tracked.c.features)
   of nkTryStmt: trackTryStmt(tracked, n)
   of nkPragma: trackPragmaStmt(tracked, n)
-  of nkAsgn, nkFastAsgn:
+  of nkAsgn, nkFastAsgn, nkSinkAsgn:
     track(tracked, n[1])
     initVar(tracked, n[0], volatileCheck=true)
     invalidateFacts(tracked.guards, n[0])

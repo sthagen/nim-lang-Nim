@@ -67,8 +67,8 @@ pkg "fidget"
 pkg "fragments", "nim c -r fragments/dsl.nim", allowFailure = true # pending https://github.com/nim-lang/packages/issues/2115 
 pkg "fusion"
 pkg "gara"
-pkg "glob", url = "https://github.com/nim-lang/glob", useHead = true
-pkg "ggplotnim", "nim c -d:noCairo -r tests/tests.nim", url = "https://github.com/nim-lang/ggplotnim", useHead = true
+pkg "glob"
+pkg "ggplotnim", "nim c -d:noCairo -r tests/tests.nim"
 pkg "gittyup", "nimble test", "https://github.com/disruptek/gittyup", allowFailure = true
 pkg "gnuplot", "nim c gnuplot.nim"
 # pkg "gram", "nim c -r --gc:arc --define:danger tests/test.nim", "https://github.com/disruptek/gram"
@@ -87,6 +87,7 @@ pkg "lockfreequeues"
 pkg "macroutils"
 pkg "manu"
 pkg "markdown"
+pkg "measuremancer", "nimble testDeps; nimble -y test"
 pkg "memo"
 pkg "msgpack4nim", "nim c -r tests/test_spec.nim"
 pkg "nake", "nim c nakefile.nim"
@@ -146,7 +147,7 @@ pkg "strslice"
 pkg "strunicode", "nim c -r --mm:refc src/strunicode.nim"
 pkg "supersnappy"
 pkg "synthesis"
-pkg "telebot", "nim c -o:tbot -r src/telebot.nim", url = "https://github.com/nim-lang/telebot.nim", useHead = true
+pkg "telebot", "nim c -o:tbot -r src/telebot.nim"
 pkg "tempdir"
 pkg "templates"
 pkg "tensordsl", "nim c -r --mm:refc tests/tests.nim", "https://krux02@bitbucket.org/krux02/tensordslnim.git"
