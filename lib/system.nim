@@ -1115,7 +1115,7 @@ elif defined(nimdoc):
   proc quit*(errorcode: int = QuitSuccess) {.magic: "Exit", noreturn.}
 
 elif defined(genode):
-  include genode/env
+  import genode/env
 
   var systemEnv {.exportc: runtimeEnvSym.}: GenodeEnvPtr
 
@@ -1609,8 +1609,7 @@ when notJSnotNims:
 {.push stackTrace: off.}
 
 when not defined(js) and hasThreadSupport and hostOS != "standalone":
-  const insideRLocksModule = false
-  include "system/syslocks"
+  import std/private/syslocks
   include "system/threadlocalstorage"
 
 when not defined(js) and defined(nimV2):
@@ -2092,7 +2091,12 @@ when not defined(js):
   when declared(initAllocator):
     initAllocator()
   when hasThreadSupport:
-    when hostOS != "standalone": include "system/threads"
+    when hostOS != "standalone":
+      include system/threadimpl
+
+      import std/threads
+      export threads
+
   elif not defined(nogc) and not defined(nimscript):
     when not defined(useNimRtl) and not defined(createNimRtl): initStackBottom()
     when declared(initGC): initGC()
@@ -2580,7 +2584,19 @@ template once*(body: untyped): untyped =
 
 {.pop.} # warning[GcMem]: off, warning[Uninit]: off
 
-proc substr*(s: string, first, last: int): string =
+proc substr*(s: openArray[char]): string =
+  ## Copies a slice of `s` into a new string and returns this new
+  ## string.
+  runnableExamples:
+    let a = "abcdefgh"
+    assert a.substr(2, 5) == "cdef"
+    assert a.substr(2) == "cdefgh"
+    assert a.substr(5, 99) == "fgh"
+  result = newString(s.len)
+  for i, ch in s:
+    result[i] = ch
+
+proc substr*(s: string, first, last: int): string = # A bug with `magic: Slice` requires this to exist this way
   ## Copies a slice of `s` into a new string and returns this new
   ## string.
   ##
