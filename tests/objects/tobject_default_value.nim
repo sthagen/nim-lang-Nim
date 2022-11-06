@@ -3,7 +3,7 @@ discard """
   targets: "c cpp js"
 """
 
-import std/[times, tables]
+import std/[times, tables, macros]
 
 type
   Guess = object
@@ -425,6 +425,56 @@ template main {.dirty.} =
 
     let x = default(A)
     doAssert $x == "(d: Uninitialized DateTime)"
+
+  block: # bug #20715
+    block:
+      type
+        Foo = enum
+          A
+          B
+
+        Bar = object
+          case foo: Foo
+          of A:
+            t: range[-1..2]
+          else: discard
+
+      var d = default(Bar)
+      doAssert d.t == -1
+
+    block:
+      type
+        Foo = enum
+          A
+          B
+
+        Bar = object
+          case foo: Foo
+          of A:
+            t: range[0..2]
+          else: discard
+
+      var d = default(Bar)
+      doAssert d.t == 0
+
+    block: # bug #20740
+      block:
+        proc foo(x: static DateTime = Datetime()) =
+          discard
+
+        foo()
+
+      block:
+        macro foo(x: static DateTime) =
+          discard x
+
+        macro foo2: untyped =
+          var x = DateTime()
+
+          result = quote do:
+            foo(`x`)
+
+        foo2()
 
 
 static: main()

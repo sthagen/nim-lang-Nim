@@ -15,6 +15,7 @@
   - `std/formatfloat`
   - `std/objectdollar`
   - `std/widestrs`
+  - `std/threads`
 
   In the future, these definitions will be removed from the `system` module,
   and their respective modules will have to be imported to use them.
@@ -36,6 +37,9 @@
   - `TaintedString`, formerly a distinct alias to `string`
   - `PInt32`, `PInt64`, `PFloat32`, `PFloat64`, aliases to
     `ptr int32`, `ptr int64`, `ptr float32`, `ptr float64`
+
+- Enabling `-d:nimPreviewSlimSystem` removes the import of `channels_builtin` in
+  in the `system` module.
 
 - The `gc:v2` option is removed.
 
@@ -109,6 +113,12 @@
 - `random.rand` now works with `Ordinal`s.
 - Undeprecated `os.isvalidfilename`.
 - `std/oids` now uses `int64` to store time internally (before it was int32).
+- `std/uri.Uri` dollar `$` improved, precalculates the `string` result length from the `Uri`.
+- `std/uri.Uri.isIpv6` is now exported.
+
+
+- `std/net.IpAddress` dollar `$` improved, uses a fixed capacity for the `string` result based from the `IpAddressFamily`.
+
 
 [//]: # "Additions:"
 - Added ISO 8601 week date utilities in `times`:
@@ -119,7 +129,7 @@
   - Added `getIsoWeeksInYear` to return the number of weeks in a week-based year.
 - Added new modules which were part of `std/os`:
   - Added `std/oserrors` for OS error reporting. Added `std/envvars` for environment variables handling.
-  - Added `std/paths`, `std/dirs`, `std/files`, `std/symlinks` and `std/appdirs`. 
+  - Added `std/paths`, `std/dirs`, `std/files`, `std/symlinks` and `std/appdirs`.
 - Added `sep` parameter in `std/uri` to specify the query separator.
 - Added bindings to [`Array.shift`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/shift)
   and [`queueMicrotask`](https://developer.mozilla.org/en-US/docs/Web/API/queueMicrotask)

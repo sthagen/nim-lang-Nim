@@ -280,7 +280,9 @@ proc TLSv1_method*(): PSSL_METHOD{.cdecl, dynlib: DLLSSLName, importc.}
 # and support SSLv3, TLSv1, TLSv1.1 and TLSv1.2
 # SSLv23_method(), SSLv23_server_method(), SSLv23_client_method() are removed in 1.1.0
 
-when compileOption("dynlibOverride", "ssl") or defined(noOpenSSLHacks):
+const useStaticLink = compileOption("dynlibOverride", "ssl") or defined(noOpenSSLHacks)
+
+when useStaticLink:
   # Static linking
 
   when defined(openssl10):
@@ -331,6 +333,7 @@ when compileOption("dynlibOverride", "ssl") or defined(noOpenSSLHacks):
   proc SSLv23_client_method*(): PSSL_METHOD {.cdecl, dynlib: DLLSSLName, importc.}
   proc SSLv2_method*(): PSSL_METHOD {.cdecl, dynlib: DLLSSLName, importc.}
   proc SSLv3_method*(): PSSL_METHOD {.cdecl, dynlib: DLLSSLName, importc.}
+  proc CRYPTO_set_mem_functions(a,b,c: pointer){.cdecl, dynlib: DLLUtilName, importc.}
 
 else:
   # Here we're trying to stay compatible between openssl versions. Some
@@ -390,6 +393,10 @@ else:
 
     let method2Proc = cast[proc(): PSSL_METHOD {.cdecl, gcsafe, raises: [].}](methodSym)
     return method2Proc()
+
+  proc CRYPTO_set_mem_functions(a,b,c: pointer) =
+    let theProc = cast[proc(a,b,c: pointer) {.cdecl.}](utilModule().symNullable("CRYPTO_set_mem_functions"))
+    if not theProc.isNil: theProc(a, b, c)
 
   proc SSL_library_init*(): cint {.discardable.} =
     ## Initialize SSL using OPENSSL_init_ssl for OpenSSL >= 1.1.0 otherwise
@@ -572,10 +579,6 @@ const
   useNimsAlloc = not defined(nimNoAllocForSSL) and not defined(gcDestructors)
 
 when not useWinVersion and not defined(macosx) and not defined(android) and useNimsAlloc:
-  proc CRYPTO_set_mem_functions(a,b,c: pointer) =
-    let theProc = cast[proc(a,b,c: pointer) {.cdecl.}](utilModule().symNullable("CRYPTO_set_mem_functions"))
-    if not theProc.isNil: theProc(a, b, c)
-
   proc allocWrapper(size: int): pointer {.cdecl.} = allocShared(size)
   proc reallocWrapper(p: pointer; newSize: int): pointer {.cdecl.} =
     if p == nil:
@@ -838,6 +841,8 @@ when not defined(nimDisableCertificateValidation) and not defined(windows):
     proc SSL_get1_peer_certificate*(ssl: SslCtx): PX509 {.cdecl, dynlib: DLLSSLName, importc.}
     proc SSL_get_peer_certificate*(ssl: SslCtx): PX509 =
       SSL_get1_peer_certificate(ssl)
+  elif useStaticLink:
+    proc SSL_get_peer_certificate*(ssl: SslCtx): PX509 {.cdecl, dynlib: DLLSSLName, importc.}
   else:
     proc SSL_get_peer_certificate*(ssl: SslCtx): PX509 =
       let methodSym = sslSymNullable("SSL_get_peer_certificate", "SSL_get1_peer_certificate")
@@ -883,6 +888,8 @@ when not defined(nimDisableCertificateValidation) and not defined(windows):
   {.pop.}
 
   when isMainModule:
+    when defined(nimPreviewSlimSystem):
+      import std/assertions
     # A simple certificate test
     let certbytes = readFile("certificate.der")
     let cert = d2i_X509(certbytes)
