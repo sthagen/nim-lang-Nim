@@ -1664,6 +1664,8 @@ proc contains*[T](a: openArray[T], item: T): bool {.inline.}=
 proc pop*[T](s: var seq[T]): T {.inline, noSideEffect.} =
   ## Returns the last item of `s` and decreases `s.len` by one. This treats
   ## `s` as a stack and implements the common *pop* operation.
+  ##
+  ## Raises `IndexDefect` if `s` is empty.
   runnableExamples:
     var a = @[1, 3, 5, 7]
     let b = pop(a)
@@ -2358,7 +2360,8 @@ when not defined(gcArc) and not defined(gcOrc):
     if s.len == 0: return
     when not defined(js) and not defined(nimscript) and not defined(nimSeqsV2):
       var s = cast[PGenericSeq](s)
-      s.reserved = s.reserved or seqShallowFlag
+      {.noSideEffect.}:
+        s.reserved = s.reserved or seqShallowFlag
 
   proc shallow*(s: var string) {.noSideEffect, inline.} =
     ## Marks a string `s` as `shallow`:idx:. Subsequent assignments will not
@@ -2371,7 +2374,8 @@ when not defined(gcArc) and not defined(gcOrc):
         s = cast[PGenericSeq](newString(0))
       # string literals cannot become 'shallow':
       if (s.reserved and strlitFlag) == 0:
-        s.reserved = s.reserved or seqShallowFlag
+        {.noSideEffect.}:
+          s.reserved = s.reserved or seqShallowFlag
 
 type
   NimNodeObj = object
