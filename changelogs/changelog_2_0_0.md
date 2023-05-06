@@ -40,7 +40,7 @@
     `ptr int32`, `ptr int64`, `ptr float32`, `ptr float64`
 
 - Enabling `-d:nimPreviewSlimSystem` removes the import of `channels_builtin` in
-  in the `system` module.
+  in the `system` module, which is replaced by [threading/channels](https://github.com/nim-lang/threading/blob/master/threading/channels.nim). Use the command "nimble install threading" and import `threading/channels`.
 
 - Enabling `-d:nimPreviewCstringConversion`, `ptr char`, `ptr array[N, char]` and `ptr UncheckedArray[N, char]` don't support conversion to cstring anymore.
 
@@ -126,6 +126,8 @@
   - `std/db_mysql` => `db_connector/db_mysql`
   - `std/db_postgres` => `db_connector/db_postgres`
   - `std/db_odbc` => `db_connector/db_odbc`
+  - `std/md5` => `checksums/md5`
+  - `std/sha1` => `checksums/sha1`
 
 - Previously, calls like `foo(a, b): ...` or `foo(a, b) do: ...` where the final argument of
   `foo` had type `proc ()` were assumed by the compiler to mean `foo(a, b, proc () = ...)`.
@@ -500,3 +502,4 @@
   e.g. instead of `--includeFile` and `--excludeFile` we have
   `--filename` and `--notFilename` respectively.
   Also the semantics become consistent for such positive/negative filters.
+- koch now supports the `--skipIntegrityCheck` option. The command `koch --skipIntegrityCheck boot -d:release` always builds the compiler twice.

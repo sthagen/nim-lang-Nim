@@ -71,7 +71,7 @@ const
     wPure, wHeader, wCompilerProc, wCore, wFinal, wSize, wShallow,
     wIncompleteStruct, wCompleteStruct, wByCopy, wByRef,
     wInheritable, wGensym, wInject, wRequiresInit, wUnchecked, wUnion, wPacked,
-    wCppNonPod, wBorrow, wGcSafe, wPartial, wExplain, wPackage}
+    wCppNonPod, wBorrow, wGcSafe, wPartial, wExplain, wPackage, wCodegenDecl}
   fieldPragmas* = declPragmas + {wGuard, wBitsize, wCursor,
     wRequiresInit, wNoalias, wAlign} - {wExportNims, wNodecl} # why exclude these?
   varPragmas* = declPragmas + {wVolatile, wRegister, wThreadVar,
@@ -826,7 +826,8 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
                   validPragmas: TSpecialWords,
                   comesFromPush, isStatement: bool): bool =
   var it = n[i]
-  var key = if it.kind in nkPragmaCallKinds and it.len > 1: it[0] else: it
+  let keyDeep = it.kind in nkPragmaCallKinds and it.len > 1
+  var key = if keyDeep: it[0] else: it
   if key.kind == nkBracketExpr:
     processNote(c, it)
     return
@@ -851,6 +852,9 @@ proc singlePragma(c: PContext, sym: PSym, n: PNode, i: var int,
     inc c.instCounter
     if c.instCounter > 100:
       globalError(c.config, it.info, "recursive dependency: " & userPragma.name.s)
+
+    if keyDeep:
+      localError(c.config, it.info, "user pragma cannot have arguments")
 
     pragma(c, sym, userPragma.ast, validPragmas, isStatement)
     n.sons[i..i] = userPragma.ast.sons # expand user pragma with its content
