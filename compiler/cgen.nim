@@ -1270,6 +1270,20 @@ proc genProcNoForward(m: BModule, prc: PSym) =
   if lfNoDecl in prc.loc.flags:
     fillProcLoc(m, prc.ast[namePos])
     genProcPrototype(m, prc)
+  elif lfDynamicLib in prc.loc.flags:
+    var q = findPendingModule(m, prc)
+    fillProcLoc(q, prc.ast[namePos])
+    genProcPrototype(m, prc)
+    if q != nil and not containsOrIncl(q.declaredThings, prc.id):
+      symInDynamicLib(q, prc)
+      # register the procedure even though it is in a different dynamic library and will not be
+      # reloadable (and has no _actual suffix) - other modules will need to be able to get it through
+      # the hcr dynlib (also put it in the DynLibInit section - right after it gets loaded)
+      if isReloadable(q, prc):
+        q.s[cfsDynLibInit].addf("\t$1 = ($2) hcrRegisterProc($3, \"$1\", (void*)$1);$n",
+            [prc.loc.r, getTypeDesc(q, prc.loc.t), getModuleDllPath(m, q.module)])
+    else:
+      symInDynamicLibPartial(m, prc)
   elif prc.typ.callConv == ccInline:
     # We add inline procs to the calling module to enable C based inlining.
     # This also means that a check with ``q.declaredThings`` is wrong, we need
@@ -1288,20 +1302,6 @@ proc genProcNoForward(m: BModule, prc: PSym) =
       #  prc.loc.r = mangleName(m, prc)
       genProcPrototype(m, prc)
       genProcAux(m, prc)
-  elif lfDynamicLib in prc.loc.flags:
-    var q = findPendingModule(m, prc)
-    fillProcLoc(q, prc.ast[namePos])
-    genProcPrototype(m, prc)
-    if q != nil and not containsOrIncl(q.declaredThings, prc.id):
-      symInDynamicLib(q, prc)
-      # register the procedure even though it is in a different dynamic library and will not be
-      # reloadable (and has no _actual suffix) - other modules will need to be able to get it through
-      # the hcr dynlib (also put it in the DynLibInit section - right after it gets loaded)
-      if isReloadable(q, prc):
-        q.s[cfsDynLibInit].addf("\t$1 = ($2) hcrRegisterProc($3, \"$1\", (void*)$1);$n",
-            [prc.loc.r, getTypeDesc(q, prc.loc.t), getModuleDllPath(m, q.module)])
-    else:
-      symInDynamicLibPartial(m, prc)
   elif sfImportc notin prc.flags:
     var q = findPendingModule(m, prc)
     fillProcLoc(q, prc.ast[namePos])
@@ -1581,11 +1581,11 @@ proc genMainProc(m: BModule) =
     m.includeHeader("<libc/component.h>")
 
   let initStackBottomCall =
-    if m.config.target.targetOS == osStandalone or m.config.selectedGC in {gcNone, gcArc, gcOrc}: "".rope
+    if m.config.target.targetOS == osStandalone or m.config.selectedGC in {gcNone, gcArc, gcAtomicArc, gcOrc}: "".rope
     else: ropecg(m, "\t#initStackBottomWith((void *)&inner);$N", [])
   inc(m.labels)
 
-  let isVolatile = if m.config.selectedGC notin {gcNone, gcArc, gcOrc}: "1" else: "0"
+  let isVolatile = if m.config.selectedGC notin {gcNone, gcArc, gcAtomicArc, gcOrc}: "1" else: "0"
   appcg(m, m.s[cfsProcs], PreMainBody, [m.g.mainDatInit, m.g.otherModsInit, m.config.nimMainPrefix, posixCmdLine, isVolatile])
 
   if m.config.target.targetOS == osWindows and
@@ -1725,7 +1725,7 @@ proc registerModuleToMain(g: BModuleList; m: BModule) =
   if sfSystemModule in m.module.flags:
     if emulatedThreadVars(m.config) and m.config.target.targetOS != osStandalone:
       g.mainDatInit.add(ropecg(m, "\t#initThreadVarsEmulation();$N", []))
-    if m.config.target.targetOS != osStandalone and m.config.selectedGC notin {gcNone, gcArc, gcOrc}:
+    if m.config.target.targetOS != osStandalone and m.config.selectedGC notin {gcNone, gcArc, gcAtomicArc, gcOrc}:
       g.mainDatInit.add(ropecg(m, "\t#initStackBottomWith((void *)&inner);$N", []))
 
   if m.s[cfsInitProc].len > 0:
@@ -2177,7 +2177,7 @@ proc finalCodegenActions*(graph: ModuleGraph; m: BModule; n: PNode): PNode =
         cgsym(m, "rawWrite")
 
       # raise dependencies on behalf of genMainProc
-      if m.config.target.targetOS != osStandalone and m.config.selectedGC notin {gcNone, gcArc, gcOrc}:
+      if m.config.target.targetOS != osStandalone and m.config.selectedGC notin {gcNone, gcArc, gcAtomicArc, gcOrc}:
         cgsym(m, "initStackBottomWith")
       if emulatedThreadVars(m.config) and m.config.target.targetOS != osStandalone:
         cgsym(m, "initThreadVarsEmulation")
