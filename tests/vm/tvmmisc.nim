@@ -668,3 +668,33 @@ block: # bug #10108
     discard y2
     reject:
       const c5 = deliver_x()
+
+block: # bug #7590
+  proc doInit[T]():auto=
+    var a: T
+    return a
+
+  proc fun2[T](tup1:T)=
+    const tup0=doInit[T]()
+
+    # var tup=tup0 #ok
+    const tup=tup0 #causes bug
+
+    doAssert tup is tuple
+    doAssert tup[0] is tuple
+    for ai in tup.fields:
+      doAssert ai is tuple, "BUG2"
+
+  # const c=(foo:(bar1: 0.0))
+  const c=(foo:(bar1:"foo1"))
+  fun2(c)
+
+block: # bug #21708
+  type
+    Tup = tuple[name: string]
+
+  const X: array[2, Tup] = [(name: "foo",), (name: "bar",)]
+
+  static:
+    let s = X[0]
+    doAssert s[0] == "foo"
