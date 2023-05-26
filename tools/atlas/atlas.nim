@@ -9,32 +9,50 @@
 ## Simple tool to automate frequent workflows: Can "clone"
 ## a Nimble dependency and its dependencies recursively.
 
-import std/[parseopt, strutils, os, osproc, tables, sets, json, jsonutils]
+import std / [parseopt, strutils, os, osproc, tables, sets, json, jsonutils,
+  parsecfg, streams]
 import parse_requires, osutils, packagesjson
 
 from unicode import nil
 
 const
-  Version = "0.2"
+  Version = "0.4"
+  LockFileName = "atlas.lock"
+  AtlasWorkspace = "atlas.workspace"
   Usage = "atlas - Nim Package Cloner Version " & Version & """
 
   (c) 2021 Andreas Rumpf
 Usage:
   atlas [options] [command] [arguments]
 Command:
+  init                  initializes the current directory as a workspace
+    --deps=DIR          use DIR as the directory for dependencies
+                        (default: store directly in the workspace)
+
+  use url|pkgname       clone a package and all of its dependencies and make
+                        it importable for the current project
   clone url|pkgname     clone a package and all of its dependencies
+  update url|pkgname    update a package and all of its dependencies
   install proj.nimble   use the .nimble file to setup the project's dependencies
   search keyw keywB...  search for package that contains the given keywords
   extract file.nimble   extract the requirements and custom commands from
                         the given Nimble file
-  update [filter]       update every package in the workspace that has a remote
+  updateProjects [filter]
+                        update every project that has a remote
                         URL that matches `filter` if a filter is given
+  updateDeps [filter]
+                        update every dependency that has a remote
+                        URL that matches `filter` if a filter is given
+  build|test|doc|tasks  currently delegates to `nimble build|test|doc`
+  task <taskname>       currently delegates to `nimble <taskname>`
 
 Options:
   --keepCommits         do not perform any `git checkouts`
   --cfgHere             also create/maintain a nim.cfg in the current
                         working directory
   --workspace=DIR       use DIR as workspace
+  --genlock             generate a lock file (use with `clone` and `update`)
+  --uselock             use the lock file for the build
   --version             show the version
   --help                show this help
 """
@@ -54,6 +72,12 @@ const
   TestsDir = "tools/atlas/tests"
 
 type
+  LockOption = enum
+    noLock, genLock, useLock
+
+  LockFileEntry = object
+    dir, url, commit: string
+
   PackageName = distinct string
   DepRelation = enum
     normal, strictlyLess, strictlyGreater
@@ -63,13 +87,16 @@ type
     url, commit: string
     rel: DepRelation # "requires x < 1.0" is silly, but Nimble allows it so we have too.
   AtlasContext = object
-    projectDir, workspace: string
+    projectDir, workspace, depsDir: string
     hasPackageList: bool
     keepCommits: bool
     cfgHere: bool
     p: Table[string, string] # name -> url mapping
     processed: HashSet[string] # the key is (url / commit)
     errors: int
+    lockOption: LockOption
+    lockFileToWrite: seq[LockFileEntry]
+    lockFileToUse: Table[string, LockFileEntry]
     when MockupRun:
       currentDir: string
       step: int
@@ -91,6 +118,20 @@ type
 
 include testdata
 
+proc silentExec(cmd: string; args: openArray[string]): (string, int) =
+  var cmdLine = cmd
+  for i in 0..<args.len:
+    cmdLine.add ' '
+    cmdLine.add quoteShell(args[i])
+  result = osproc.execCmdEx(cmdLine)
+
+proc nimbleExec(cmd: string; args: openArray[string]) =
+  var cmdLine = "nimble " & cmd
+  for i in 0..<args.len:
+    cmdLine.add ' '
+    cmdLine.add quoteShell(args[i])
+  discard os.execShellCmd(cmdLine)
+
 proc exec(c: var AtlasContext; cmd: Command; args: openArray[string]): (string, int) =
   when MockupRun:
     assert TestLog[c.step].cmd == cmd, $(TestLog[c.step].cmd, cmd)
@@ -109,11 +150,7 @@ proc exec(c: var AtlasContext; cmd: Command; args: openArray[string]): (string, 
       result[1] = TestLog[c.step].exitCode
     inc c.step
   else:
-    var cmdLine = $cmd
-    for i in 0..<args.len:
-      cmdLine.add ' '
-      cmdLine.add quoteShell(args[i])
-    result = osproc.execCmdEx(cmdLine)
+    result = silentExec($cmd, args)
     when ProduceTest:
       echo "cmd ", cmd, " args ", args, " --> ", result
 
@@ -164,13 +201,14 @@ proc message(c: var AtlasContext; category: string; p: PackageName; args: vararg
     msg.add ' '
     msg.add a
   stdout.writeLine msg
-  inc c.errors
 
 proc warn(c: var AtlasContext; p: PackageName; args: varargs[string]) =
   message(c, "[Warning] ", p, args)
+  inc c.errors
 
 proc error(c: var AtlasContext; p: PackageName; args: varargs[string]) =
   message(c, "[Error] ", p, args)
+  inc c.errors
 
 proc sameVersionAs(tag, ver: string): bool =
   const VersionChars = {'0'..'9', '.'}
@@ -248,7 +286,9 @@ proc toUrl(c: var AtlasContext; p: string): string =
     fillPackageLookupTable(c)
     result = c.p.getOrDefault(unicode.toLower p)
   if result.len == 0:
-    inc c.errors
+    result = getUrlFromGithub(p)
+    if result.len == 0:
+      inc c.errors
 
 proc toName(p: string): PackageName =
   if p.isUrl:
@@ -262,20 +302,53 @@ proc needsCommitLookup(commit: string): bool {.inline.} =
 proc isShortCommitHash(commit: string): bool {.inline.} =
   commit.len >= 4 and commit.len < 40
 
+proc getRequiredCommit(c: var AtlasContext; w: Dependency): string =
+  if needsCommitLookup(w.commit): versionToCommit(c, w)
+  elif isShortCommitHash(w.commit): shortToCommit(c, w.commit)
+  else: w.commit
+
+proc getRemoteUrl(): string =
+  execProcess("git config --get remote.origin.url").strip()
+
+proc genLockEntry(c: var AtlasContext; w: Dependency; dir: string) =
+  let url = getRemoteUrl()
+  var commit = getRequiredCommit(c, w)
+  if commit.len == 0 or needsCommitLookup(commit):
+    commit = execProcess("git log -1 --pretty=format:%H").strip()
+  c.lockFileToWrite.add LockFileEntry(dir: relativePath(dir, c.workspace, '/'), url: url, commit: commit)
+
+proc commitFromLockFile(c: var AtlasContext; dir: string): string =
+  let url = getRemoteUrl()
+  let d = relativePath(dir, c.workspace, '/')
+  if d in c.lockFileToUse:
+    result = c.lockFileToUse[d].commit
+    let wanted = c.lockFileToUse[d].url
+    if wanted != url:
+      error c, PackageName(d), "remote URL has been compromised: got: " &
+          url & " but wanted: " & wanted
+  else:
+    error c, PackageName(d), "package is not listed in the lock file"
+
+proc dependencyDir(c: AtlasContext; w: Dependency): string =
+  result = c.workspace / w.name.string
+  if not dirExists(result):
+    result = c.depsDir / w.name.string
+
 proc checkoutCommit(c: var AtlasContext; w: Dependency) =
-  let dir = c.workspace / w.name.string
+  let dir = dependencyDir(c, w)
   withDir c, dir:
-    if w.commit.len == 0 or cmpIgnoreCase(w.commit, "head") == 0:
+    if c.lockOption == genLock:
+      genLockEntry(c, w, dir)
+    elif c.lockOption == useLock:
+      checkoutGitCommit(c, w.name, commitFromLockFile(c, dir))
+    elif w.commit.len == 0 or cmpIgnoreCase(w.commit, "head") == 0:
       gitPull(c, w.name)
     else:
       let err = isCleanGit(c)
       if err != "":
         warn c, w.name, err
       else:
-        let requiredCommit =
-          if needsCommitLookup(w.commit): versionToCommit(c, w)
-          elif isShortCommitHash(w.commit): shortToCommit(c, w.commit)
-          else: w.commit
+        let requiredCommit = getRequiredCommit(c, w)
         let (cc, status) = exec(c, GitCurrentCommit, [])
         let currentCommit = strutils.strip(cc)
         if requiredCommit == "" or status != 0:
@@ -304,10 +377,11 @@ proc findNimbleFile(c: AtlasContext; dep: Dependency): string =
     result = TestsDir / dep.name.string & ".nimble"
     doAssert fileExists(result), "file does not exist " & result
   else:
-    result = c.workspace / dep.name.string / (dep.name.string & ".nimble")
+    let dir = dependencyDir(c, dep)
+    result = dir / (dep.name.string & ".nimble")
     if not fileExists(result):
       result = ""
-      for x in walkFiles(c.workspace / dep.name.string / "*.nimble"):
+      for x in walkFiles(dir / "*.nimble"):
         if result.len == 0:
           result = x
         else:
@@ -315,16 +389,31 @@ proc findNimbleFile(c: AtlasContext; dep: Dependency): string =
           return ""
 
 proc addUniqueDep(c: var AtlasContext; work: var seq[Dependency];
-                  tokens: seq[string]) =
+                  tokens: seq[string]; lockfile: Table[string, LockFileEntry]) =
+  let pkgName = tokens[0]
   let oldErrors = c.errors
-  let url = toUrl(c, tokens[0])
+  let url = toUrl(c, pkgName)
   if oldErrors != c.errors:
-    warn c, toName(tokens[0]), "cannot resolve package name"
+    warn c, toName(pkgName), "cannot resolve package name"
   elif not c.processed.containsOrIncl(url / tokens[2]):
-    work.add Dependency(name: toName(tokens[0]), url: url, commit: tokens[2],
-                        rel: toDepRelation(tokens[1]))
+    if lockfile.contains(pkgName):
+      work.add Dependency(name: toName(pkgName),
+                          url: lockfile[pkgName].url,
+                          commit: lockfile[pkgName].commit,
+                          rel: normal)
+    else:
+      work.add Dependency(name: toName(pkgName), url: url, commit: tokens[2],
+                          rel: toDepRelation(tokens[1]))
 
 template toDestDir(p: PackageName): string = p.string
+
+proc readLockFile(filename: string): Table[string, LockFileEntry] =
+  let jsonAsStr = readFile(filename)
+  let jsonTree = parseJson(jsonAsStr)
+  let data = to(jsonTree, seq[LockFileEntry])
+  result = initTable[string, LockFileEntry]()
+  for d in items(data):
+    result[d.dir] = d
 
 proc collectDeps(c: var AtlasContext; work: var seq[Dependency];
                  dep: Dependency; nimbleFile: string): string =
@@ -332,6 +421,11 @@ proc collectDeps(c: var AtlasContext; work: var seq[Dependency];
   # else return "".
   assert nimbleFile != ""
   let nimbleInfo = extractRequiresInfo(c, nimbleFile)
+
+  let lockFilePath = dependencyDir(c, dep) / LockFileName
+  let lockFile = if fileExists(lockFilePath): readLockFile(lockFilePath)
+                 else: initTable[string, LockFileEntry]()
+
   for r in nimbleInfo.requires:
     var tokens: seq[string] = @[]
     for token in tokenizeRequires(r):
@@ -349,7 +443,7 @@ proc collectDeps(c: var AtlasContext; work: var seq[Dependency];
       tokens.add commit
 
     if tokens.len >= 3 and cmpIgnoreCase(tokens[0], "nim") != 0:
-      c.addUniqueDep work, tokens
+      c.addUniqueDep work, tokens, lockFile
   result = toDestDir(dep.name) / nimbleInfo.srcDir
 
 proc collectNewDeps(c: var AtlasContext; work: var seq[Dependency];
@@ -362,7 +456,7 @@ proc collectNewDeps(c: var AtlasContext; work: var seq[Dependency];
   else:
     result.add toDestDir(dep.name)
 
-proc cloneLoop(c: var AtlasContext; work: var seq[Dependency]): seq[string] =
+proc cloneLoop(c: var AtlasContext; work: var seq[Dependency]; startIsDep: bool): seq[string] =
   result = @[]
   var i = 0
   while i < work.len:
@@ -370,8 +464,8 @@ proc cloneLoop(c: var AtlasContext; work: var seq[Dependency]): seq[string] =
     let destDir = toDestDir(w.name)
     let oldErrors = c.errors
 
-    if not dirExists(c.workspace / destDir):
-      withDir c, c.workspace:
+    if not dirExists(c.workspace / destDir) and not dirExists(c.depsDir / destDir):
+      withDir c, (if i != 0 or startIsDep: c.depsDir else: c.workspace):
         let err = cloneUrl(c, w.url, destDir, false)
         if err != "":
           error c, w.name, err
@@ -383,7 +477,7 @@ proc cloneLoop(c: var AtlasContext; work: var seq[Dependency]): seq[string] =
       collectNewDeps(c, work, w, result, i == 0)
     inc i
 
-proc clone(c: var AtlasContext; start: string): seq[string] =
+proc clone(c: var AtlasContext; start: string; startIsDep: bool): seq[string] =
   # non-recursive clone.
   let url = toUrl(c, start)
   var work = @[Dependency(name: toName(start), url: url, commit: "")]
@@ -393,7 +487,11 @@ proc clone(c: var AtlasContext; start: string): seq[string] =
     return
 
   c.projectDir = c.workspace / toDestDir(work[0].name)
-  result = cloneLoop(c, work)
+  if c.lockOption == useLock:
+    c.lockFileToUse = readLockFile(c.projectDir / LockFileName)
+  result = cloneLoop(c, work, startIsDep)
+  if c.lockOption == genLock:
+    writeFile c.projectDir / LockFileName, toJson(c.lockFileToWrite).pretty
 
 const
   configPatternBegin = "############# begin Atlas config section ##########\n"
@@ -403,7 +501,9 @@ proc patchNimCfg(c: var AtlasContext; deps: seq[string]; cfgPath: string) =
   var paths = "--noNimblePath\n"
   for d in deps:
     let pkgname = toDestDir d.PackageName
-    let x = relativePath(c.workspace / pkgname, cfgPath, '/')
+    let pkgdir = if dirExists(c.workspace / pkgname): c.workspace / pkgname
+                 else: c.depsDir / pkgName
+    let x = relativePath(pkgdir, cfgPath, '/')
     paths.add "--path:\"" & x & "\"\n"
   var cfgContent = configPatternBegin & paths & configPatternEnd
 
@@ -446,14 +546,14 @@ proc installDependencies(c: var AtlasContext; nimbleFile: string) =
   # 1. find .nimble file in CWD
   # 2. install deps from .nimble
   var work: seq[Dependency] = @[]
-  let (path, pkgname, _) = splitFile(nimbleFile)
+  let (_, pkgname, _) = splitFile(nimbleFile)
   let dep = Dependency(name: toName(pkgname), url: "", commit: "")
   discard collectDeps(c, work, dep, nimbleFile)
-  let paths = cloneLoop(c, work)
+  let paths = cloneLoop(c, work, startIsDep = true)
   patchNimCfg(c, paths, if c.cfgHere: getCurrentDir() else: findSrcDir(c))
 
-proc updateWorkspace(c: var AtlasContext; filter: string) =
-  for kind, file in walkDir(c.workspace):
+proc updateDir(c: var AtlasContext; dir, filter: string) =
+  for kind, file in walkDir(dir):
     if kind == pcDir and dirExists(file / ".git"):
       c.withDir file:
         let pkg = PackageName(file)
@@ -473,6 +573,123 @@ proc updateWorkspace(c: var AtlasContext; filter: string) =
             else:
               error c, pkg, "could not fetch current branch name"
 
+proc addUnique[T](s: var seq[T]; elem: sink T) =
+  if not s.contains(elem): s.add elem
+
+proc addDepFromNimble(c: var AtlasContext; deps: var seq[string]; project: PackageName; dep: string) =
+  var depDir = c.workspace / dep
+  if not dirExists(depDir):
+    depDir = c.depsDir /  dep
+  if dirExists(depDir):
+    withDir c, depDir:
+      let src = findSrcDir(c)
+      if src.len != 0:
+        deps.addUnique dep / src
+      else:
+        deps.addUnique dep
+  else:
+    warn c, project, "cannot find: " & depDir
+
+proc patchNimbleFile(c: var AtlasContext; dep: string; deps: var seq[string]) =
+  let thisProject = getCurrentDir().splitPath.tail
+  let oldErrors = c.errors
+  let url = toUrl(c, dep)
+  if oldErrors != c.errors:
+    warn c, toName(dep), "cannot resolve package name"
+  else:
+    var nimbleFile = ""
+    for x in walkFiles("*.nimble"):
+      if nimbleFile.len == 0:
+        nimbleFile = x
+      else:
+        # ambiguous .nimble file
+        warn c, toName(dep), "cannot determine `.nimble` file; there are multiple to choose from"
+        return
+    # see if we have this requirement already listed. If so, do nothing:
+    var found = false
+    if nimbleFile.len > 0:
+      let nimbleInfo = extractRequiresInfo(c, nimbleFile)
+      for r in nimbleInfo.requires:
+        var tokens: seq[string] = @[]
+        for token in tokenizeRequires(r):
+          tokens.add token
+        if tokens.len > 0:
+          let oldErrors = c.errors
+          let urlB = toUrl(c, tokens[0])
+          if oldErrors != c.errors:
+            warn c, toName(tokens[0]), "cannot resolve package name; found in: " & nimbleFile
+          if url == urlB:
+            found = true
+
+          if cmpIgnoreCase(tokens[0], "nim") != 0:
+            c.addDepFromNimble deps, toName(thisProject), tokens[0]
+
+    if not found:
+      let line = "requires \"$1@#head\"\n" % dep.escape("", "")
+      if nimbleFile.len > 0:
+        let oldContent = readFile(nimbleFile)
+        writeFile nimbleFile, oldContent & "\n" & line
+        message(c, "[Info] ", toName(thisProject), "updated: " & nimbleFile)
+      else:
+        let outfile = thisProject & ".nimble"
+        writeFile outfile, line
+        message(c, "[Info] ", toName(thisProject), "created: " & outfile)
+      c.addDepFromNimble deps, toName(thisProject), dep
+    else:
+      message(c, "[Info] ", toName(thisProject), "up to date: " & nimbleFile)
+
+proc detectWorkspace(): string =
+  result = getCurrentDir()
+  while result.len > 0:
+    if fileExists(result / AtlasWorkspace):
+      return result
+    result = result.parentDir()
+
+proc absoluteDepsDir(workspace, value: string): string =
+  if value == ".":
+    result = workspace
+  elif isAbsolute(value):
+    result = value
+  else:
+    result = workspace / value
+
+when MockupRun:
+  proc autoWorkspace(): string =
+    result = getCurrentDir()
+    while result.len > 0 and dirExists(result / ".git"):
+      result = result.parentDir()
+
+proc createWorkspaceIn(workspace, depsDir: string) =
+  if not fileExists(workspace / AtlasWorkspace):
+    writeFile workspace / AtlasWorkspace, "deps=\"$#\"" % escape(depsDir, "", "")
+  createDir absoluteDepsDir(workspace, depsDir)
+
+proc readConfig(c: var AtlasContext) =
+  let configFile = c.workspace / AtlasWorkspace
+  var f = newFileStream(configFile, fmRead)
+  if f == nil:
+    error c, toName(configFile), "cannot open: " & configFile
+    return
+  var p: CfgParser
+  open(p, f, configFile)
+  while true:
+    var e = next(p)
+    case e.kind
+    of cfgEof: break
+    of cfgSectionStart:
+      discard "who cares about sections"
+    of cfgKeyValuePair:
+      case e.key.normalize
+      of "deps":
+        c.depsDir = absoluteDepsDir(c.workspace, e.value)
+      else:
+        warn c, toName(configFile), "ignored unknown setting: " & e.key
+    of cfgOption:
+      discard "who cares about options"
+    of cfgError:
+      error c, toName(configFile), e.msg
+  close(p)
+
 proc main =
   var action = ""
   var args: seq[string] = @[]
@@ -483,6 +700,11 @@ proc main =
   template noArgs() =
     if args.len != 0:
       error action & " command takes no arguments"
+
+  template projectCmd() =
+    if getCurrentDir() == c.workspace or getCurrentDir() == c.depsDir:
+      error action & " command must be executed in a project, not in the workspace"
+      return
 
   var c = AtlasContext(
     projectDir: getCurrentDir(),
@@ -501,29 +723,60 @@ proc main =
       of "version", "v": writeVersion()
       of "keepcommits": c.keepCommits = true
       of "workspace":
-        if val.len > 0:
+        if val == ".":
+          c.workspace = getCurrentDir()
+          createWorkspaceIn c.workspace, c.depsDir
+        elif val.len > 0:
           c.workspace = val
           createDir(val)
+          createWorkspaceIn c.workspace, c.depsDir
+        else:
+          writeHelp()
+      of "deps":
+        if val.len > 0:
+          c.depsDir = val
         else:
           writeHelp()
       of "cfghere": c.cfgHere = true
+      of "genlock":
+        if c.lockOption != useLock:
+          c.lockOption = genLock
+        else:
+          writeHelp()
+      of "uselock":
+        if c.lockOption != genLock:
+          c.lockOption = useLock
+        else:
+          writeHelp()
       else: writeHelp()
     of cmdEnd: assert false, "cannot happen"
 
   if c.workspace.len > 0:
     if not dirExists(c.workspace): error "Workspace directory '" & c.workspace & "' not found."
-  else:
-    c.workspace = getCurrentDir()
-    while c.workspace.len > 0 and dirExists(c.workspace / ".git"):
-      c.workspace = c.workspace.parentDir()
-  echo "Using workspace ", c.workspace
+  elif action != "init":
+    when MockupRun:
+      c.workspace = autoWorkspace()
+    else:
+      c.workspace = detectWorkspace()
+      if c.workspace.len > 0:
+        readConfig c
+      else:
+        error "No workspace found. Run `atlas init` if you want this current directory to be your workspace."
+        return
+      echo "Using workspace ", c.workspace
+
+  when MockupRun:
+    c.depsDir = c.workspace
 
   case action
   of "":
     error "No action."
-  of "clone":
+  of "init":
+    c.workspace = getCurrentDir()
+    createWorkspaceIn c.workspace, c.depsDir
+  of "clone", "update":
     singleArg()
-    let deps = clone(c, args[0])
+    let deps = clone(c, args[0], startIsDep = false)
     patchNimCfg c, deps, if c.cfgHere: getCurrentDir() else: findSrcDir(c)
     when MockupRun:
       if not c.mockupSuccess:
@@ -531,7 +784,17 @@ proc main =
     else:
       if c.errors > 0:
         error "There were problems."
+  of "use":
+    projectCmd()
+    singleArg()
+    discard clone(c, args[0], startIsDep = true)
+    var deps: seq[string] = @[]
+    patchNimbleFile(c, args[0], deps)
+    patchNimCfg c, deps, getCurrentDir()
+    if c.errors > 0:
+      error "There were problems."
   of "install":
+    projectCmd()
     if args.len > 1:
       error "install command takes a single argument"
     var nimbleFile = ""
@@ -543,44 +806,33 @@ proc main =
         break
     if nimbleFile.len == 0:
       error "could not find a .nimble file"
-    installDependencies(c, nimbleFile)
+    else:
+      installDependencies(c, nimbleFile)
   of "refresh":
     noArgs()
     updatePackages(c)
   of "search", "list":
     updatePackages(c)
     search getPackages(c.workspace), args
-  of "update":
-    updateWorkspace(c, if args.len == 0: "" else: args[0])
+  of "updateprojects":
+    updateDir(c, c.workspace, if args.len == 0: "" else: args[0])
+  of "updatedeps":
+    updateDir(c, c.depsDir, if args.len == 0: "" else: args[0])
   of "extract":
     singleArg()
     if fileExists(args[0]):
       echo toJson(extractRequiresInfo(args[0]))
     else:
       error "File does not exist: " & args[0]
+  of "build", "test", "doc", "tasks":
+    projectCmd()
+    nimbleExec(action, args)
+  of "task":
+    projectCmd()
+    nimbleExec("", args)
   else:
     error "Invalid action: " & action
 
 when isMainModule:
   main()
 
-when false:
-  # some testing code for the `patchNimCfg` logic:
-  var c = AtlasContext(
-    projectDir: getCurrentDir(),
-    workspace: getCurrentDir().parentDir)
-
-  patchNimCfg(c, @[PackageName"abc", PackageName"xyz"])
-
-when false:
-  assert sameVersionAs("v0.2.0", "0.2.0")
-  assert sameVersionAs("v1", "1")
-
-  assert sameVersionAs("1.90", "1.90")
-
-  assert sameVersionAs("v1.2.3-zuzu", "1.2.3")
-  assert sameVersionAs("foo-1.2.3.4", "1.2.3.4")
-
-  assert not sameVersionAs("foo-1.2.3.4", "1.2.3")
-  assert not sameVersionAs("foo", "1.2.3")
-  assert not sameVersionAs("", "1.2.3")
