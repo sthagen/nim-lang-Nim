@@ -450,9 +450,10 @@ proc genDeepCopy(p: BProc; dest, src: TLoc) =
               [addrLoc(p.config, dest), rdLoc(src),
               genTypeInfoV1(p.module, dest.t, dest.lode.info)])
   of tyOpenArray, tyVarargs:
+    let source = addrLocOrTemp(src)
     linefmt(p, cpsStmts,
-         "#genericDeepCopyOpenArray((void*)$1, (void*)$2, $1Len_0, $3);$n",
-         [addrLoc(p.config, dest), addrLocOrTemp(src),
+         "#genericDeepCopyOpenArray((void*)$1, (void*)$2, $2->Field1, $3);$n",
+         [addrLoc(p.config, dest), source,
          genTypeInfoV1(p.module, dest.t, dest.lode.info)])
   of tySet:
     if mapSetType(p.config, ty) == ctArray:
@@ -932,10 +933,17 @@ proc genFieldCheck(p: BProc, e: PNode, obj: Rope, field: PSym) =
     var discIndex = newRopeAppender()
     rdSetElemLoc(p.config, v, u.t, discIndex)
     if optTinyRtti in p.config.globalOptions:
-      # not sure how to use `genEnumToStr` here
-      if p.config.getStdlibVersion < (1, 5, 1):
-        const code = "{ #raiseFieldError($1); "
-        linefmt(p, cpsStmts, code, [strLit])
+      let base = disc.typ.skipTypes(abstractInst+{tyRange})
+      case base.kind
+      of tyEnum:
+        const code = "{ #raiseFieldErrorStr($1, $2); "
+        let toStrProc = getToStringProc(p.module.g.graph, base)
+        # XXX need to modify this logic for IC.
+        # need to analyze nkFieldCheckedExpr and marks procs "used" like range checks in dce
+        var toStr: TLoc
+        expr(p, newSymNode(toStrProc), toStr)
+        let enumStr = "$1($2)" % [rdLoc(toStr), rdLoc(v)]
+        linefmt(p, cpsStmts, code, [strLit, enumStr])
       else:
         const code = "{ #raiseFieldError2($1, (NI)$2); "
         linefmt(p, cpsStmts, code, [strLit, discIndex])
@@ -946,12 +954,8 @@ proc genFieldCheck(p: BProc, e: PNode, obj: Rope, field: PSym) =
       var firstLit = newRopeAppender()
       int64Literal(cast[int](first), firstLit)
       let discName = genTypeInfo(p.config, p.module, disc.sym.typ, e.info)
-      if p.config.getStdlibVersion < (1,5,1):
-        const code = "{ #raiseFieldError($1); "
-        linefmt(p, cpsStmts, code, [strLit])
-      else:
-        const code = "{ #raiseFieldError2($1, #reprDiscriminant(((NI)$2) + (NI)$3, $4)); "
-        linefmt(p, cpsStmts, code, [strLit, discIndex, firstLit, discName])
+      const code = "{ #raiseFieldError2($1, #reprDiscriminant(((NI)$2) + (NI)$3, $4)); "
+      linefmt(p, cpsStmts, code, [strLit, discIndex, firstLit, discName])
 
     raiseInstr(p, p.s(cpsStmts))
     linefmt p, cpsStmts, "}$n", []
@@ -2355,11 +2359,6 @@ proc genMove(p: BProc; n: PNode; d: var TLoc) =
     genAssignment(p, d, a, {})
     resetLoc(p, a)
 
-proc genDup(p: BProc; src: TLoc; d: var TLoc; n: PNode) =
-  if d.k == locNone: getTemp(p, n.typ, d)
-  linefmt(p, cpsStmts, "#nimDupRef((void**)$1, (void*)$2);$n",
-          [addrLoc(p.config, d), rdLoc(src)])
-
 proc genDestroy(p: BProc; n: PNode) =
   if optSeqDestructors in p.config.globalOptions:
     let arg = n[1].skipAddr
@@ -2611,11 +2610,6 @@ proc genMagicExpr(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   of mAccessTypeField: genAccessTypeField(p, e, d)
   of mSlice: genSlice(p, e, d)
   of mTrace: discard "no code to generate"
-  of mDup:
-    var a: TLoc
-    let x = if e[1].kind in {nkAddr, nkHiddenAddr}: e[1][0] else: e[1]
-    initLocExpr(p, x, a)
-    genDup(p, a, d, e)
   else:
     when defined(debugMagics):
       echo p.prc.name.s, " ", p.prc.id, " ", p.prc.flags, " ", p.prc.ast[genericParamsPos].kind
