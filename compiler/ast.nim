@@ -283,7 +283,7 @@ type
     sfNamedParamCall, # symbol needs named parameter call syntax in target
                       # language; for interfacing with Objective C
     sfDiscardable,    # returned value may be discarded implicitly
-    sfOverriden,      # proc is overridden
+    sfOverridden,      # proc is overridden
     sfCallsite        # A flag for template symbols to tell the
                       # compiler it should use line information from
                       # the calling side of the macro, not from the
@@ -339,8 +339,8 @@ const
 
   sfCompileToCpp* = sfInfixCall       # compile the module as C++ code
   sfCompileToObjc* = sfNamedParamCall # compile the module as Objective-C code
-  sfExperimental* = sfOverriden       # module uses the .experimental switch
-  sfGoto* = sfOverriden               # var is used for 'goto' code generation
+  sfExperimental* = sfOverridden       # module uses the .experimental switch
+  sfGoto* = sfOverridden               # var is used for 'goto' code generation
   sfWrittenTo* = sfBorrow             # param is assigned to
                                       # currently unimplemented
   sfBase* = sfDiscriminant
@@ -859,7 +859,7 @@ type
                               # keep in sync with PackedLib
     kind*: TLibKind
     generated*: bool          # needed for the backends:
-    isOverriden*: bool
+    isOverridden*: bool
     name*: Rope
     path*: PNode              # can be a string literal!
 
@@ -1929,11 +1929,6 @@ proc isRoutine*(s: PSym): bool {.inline.} =
 proc isCompileTimeProc*(s: PSym): bool {.inline.} =
   result = s.kind == skMacro or
            s.kind in {skProc, skFunc} and sfCompileTime in s.flags
-
-proc isRunnableExamples*(n: PNode): bool =
-  # Templates and generics don't perform symbol lookups.
-  result = n.kind == nkSym and n.sym.magic == mRunnableExamples or
-    n.kind == nkIdent and n.ident.s == "runnableExamples"
 
 proc hasPattern*(s: PSym): bool {.inline.} =
   result = isRoutine(s) and s.ast[patternPos].kind != nkEmpty
