@@ -822,9 +822,6 @@ type
     locOther                  # location is something other
   TLocFlag* = enum
     lfIndirect,               # backend introduced a pointer
-    lfFullExternalName, # only used when 'conf.cmd == cmdNimfix': Indicates
-      # that the symbol has been imported via 'importc: "fullname"' and
-      # no format string.
     lfNoDeepCopy,             # no need for a deep copy
     lfNoDecl,                 # do not declare it in C
     lfDynamicLib,             # link symbol to dynamic library
@@ -1128,11 +1125,10 @@ const
 
 proc getPIdent*(a: PNode): PIdent {.inline.} =
   ## Returns underlying `PIdent` for `{nkSym, nkIdent}`, or `nil`.
-  # xxx consider whether also returning the 1st ident for {nkOpenSymChoice, nkClosedSymChoice}
-  # which may simplify code.
   case a.kind
   of nkSym: a.sym.name
   of nkIdent: a.ident
+  of nkOpenSymChoice, nkClosedSymChoice: a.sons[0].sym.name
   else: nil
 
 const
