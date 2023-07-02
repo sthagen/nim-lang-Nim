@@ -215,7 +215,7 @@ proc sumGeneric(t: PType): int =
   # and Foo[T] has the value 2 so that we know Foo[Foo[T]] is more
   # specific than Foo[T].
   var t = t
-  var isvar = 1
+  var isvar = 0
   while true:
     case t.kind
     of tyGenericInst, tyArray, tyRef, tyPtr, tyDistinct, tyUncheckedArray,
@@ -251,6 +251,8 @@ proc sumGeneric(t: PType): int =
     of tyBool, tyChar, tyEnum, tyObject, tyPointer,
         tyString, tyCstring, tyInt..tyInt64, tyFloat..tyFloat128,
         tyUInt..tyUInt64, tyCompositeTypeClass:
+      return isvar + 1
+    of tyBuiltInTypeClass:
       return isvar
     else:
       return 0
@@ -1138,6 +1140,13 @@ proc typeRel(c: var TCandidate, f, aOrig: PType,
       let x = typeRel(c, a, f, flags + {trDontBind})
       if x >= isGeneric:
         return isGeneric
+  
+  of tyFromExpr:
+    if c.c.inGenericContext > 0:
+      # generic type bodies can sometimes compile call expressions
+      # prevent expressions with unresolved types from
+      # being passed as parameters
+      return isNone
   else: discard
 
   case f.kind
@@ -2213,6 +2222,10 @@ proc paramTypesMatchAux(m: var TCandidate, f, a: PType,
   of isNone:
     # do not do this in ``typeRel`` as it then can't infer T in ``ref T``:
     if a.kind in {tyProxy, tyUnknown}:
+      if a.kind == tyUnknown and c.inGenericContext > 0:
+        # don't bother with fauxMatch mechanism in generic type,
+        # reject match, typechecking will be delayed to instantiation
+        return nil
       inc(m.genericMatches)
       m.fauxMatch = a.kind
       return arg
