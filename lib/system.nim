@@ -156,6 +156,16 @@ proc move*[T](x: var T): T {.magic: "Move", noSideEffect.} =
   {.cast(raises: []), cast(tags: []).}:
     `=wasMoved`(x)
 
+when defined(nimHasEnsureMove):
+  proc ensureMove*[T](x: T): T {.magic: "EnsureMove", noSideEffect.} =
+    ## Ensures that `x` is moved to the new location, otherwise it gives
+    ## an error at the compile time.
+    runnableExamples:
+      var x = "Hello"
+      let y = ensureMove(x)
+      doAssert y == "Hello"
+    discard "implemented in injectdestructors"
+
 type
   range*[T]{.magic: "Range".}         ## Generic type to construct range types.
   array*[I, T]{.magic: "Array".}      ## Generic type to construct
@@ -914,7 +924,7 @@ proc default*[T](_: typedesc[T]): T {.magic: "Default", noSideEffect.} =
   ## See also:
   ## * `zeroDefault <#zeroDefault,typedesc[T]>`_
   ##
-  runnableExamples:
+  runnableExamples("-d:nimPreviewRangeDefault"):
     assert (int, float).default == (0, 0.0)
     type Foo = object
       a: range[2..6]
@@ -2279,7 +2289,7 @@ elif defined(nimdoc):
     ##    `quit(int(0x100000000))` is equal to `quit(127)` on Linux.
     ##
     ## .. danger:: In almost all cases, in particular in library code, prefer
-    ##   alternatives, e.g. `doAssert false` or raise a `Defect`.
+    ##   alternatives, e.g. `raiseAssert` or raise a `Defect`.
     ##   `quit` bypasses regular control flow in particular `defer`,
     ##   `try`, `catch`, `finally` and `destructors`, and exceptions that may have been
     ##   raised by an `addExitProc` proc, as well as cleanup code in other threads.
@@ -2394,6 +2404,16 @@ macro varargsLen*(x: varargs[untyped]): int {.since: (1, 1).} =
 when defined(nimV2):
   import system/repr_v2
   export repr_v2
+
+proc repr*[T, U](x: HSlice[T, U]): string =
+  ## Generic `repr` operator for slices that is lifted from the components
+  ## of `x`. Example:
+  ##
+  ## .. code-block:: Nim
+  ##  $(1 .. 5) == "1 .. 5"
+  result = repr(x.a)
+  result.add(" .. ")
+  result.add(repr(x.b))
 
 when hasAlloc or defined(nimscript):
   proc insert*(x: var string, item: string, i = 0.Natural) {.noSideEffect.} =
@@ -2545,7 +2565,7 @@ when hasAlloc and notJSnotNims:
     ## This is also used by the code generator
     ## for the implementation of `spawn`.
     ##
-    ## For `--gc:arc` or `--gc:orc` deepcopy support has to be enabled
+    ## For `--mm:arc` or `--mm:orc` deepcopy support has to be enabled
     ## via `--deepcopy:on`.
     discard
 
@@ -2791,7 +2811,7 @@ when notJSnotNims and not defined(nimSeqsV2):
     ## String literals (e.g. "abc", etc) in the ARC/ORC mode are "copy on write",
     ## therefore you should call `prepareMutation` before modifying the strings
     ## via `addr`.
-    runnableExamples("--gc:arc"):
+    runnableExamples:
       var x = "abc"
       var y = "defgh"
       prepareMutation(y) # without this, you may get a `SIGBUS` or `SIGSEGV`

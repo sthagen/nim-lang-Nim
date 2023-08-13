@@ -1,4 +1,4 @@
-# v2.0.0 - yyyy-mm-dd
+# v2.0.0 - 2023-08-01
 
 
 ## Changes affecting backward compatibility
@@ -344,6 +344,7 @@
   + Added `toDateString`, `toISOString`, `toJSON`, `toTimeString`, `toUTCString` converters for `DateTime`.
 - Added `BackwardsIndex` overload for `CacheSeq`.
 - Added support for nested `with` blocks in `std/with`.
+- Added `ensureMove` to the system module. It ensures that the passed argument is moved, otherwise an error is given at the compile time.
 
 
 [//]: # "Deprecations:"
@@ -457,6 +458,9 @@
 - IBM Z architecture and macOS m1 arm64 architecture are supported.
 
 - `=wasMoved` can now be overridden by users.
+
+- There is a new pragma called [quirky](https://nim-lang.github.io/Nim/manual_experimental.html#quirky-routines) that can be used to affect the code
+  generation of goto based exception handling. It can improve the produced code size but its effects can be subtle so use it with care.
 
 - Tuple unpacking for variables is now treated as syntax sugar that directly
   expands into multiple assignments. Along with this, tuple unpacking for
