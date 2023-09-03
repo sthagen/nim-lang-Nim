@@ -92,7 +92,10 @@ proc semExprCheck(c: PContext, n: PNode, flags: TExprFlags, expectedType: PType 
 
 proc ambiguousSymChoice(c: PContext, orig, n: PNode): PNode =
   let first = n[0].sym
-  if first.kind == skEnumField:
+  var foundSym: PSym = nil
+  if first.kind == skEnumField and
+      not isAmbiguous(c, first.name, {skEnumField}, foundSym) and
+      foundSym == first:
     # choose the first resolved enum field, i.e. the latest in scope
     # to mirror behavior before overloadable enums
     if hintAmbiguousEnum in c.config.notes:
@@ -311,7 +314,7 @@ proc isOwnedSym(c: PContext; n: PNode): bool =
   let s = qualifiedLookUp(c, n, {})
   result = s != nil and sfSystemModule in s.owner.flags and s.name.s == "owned"
 
-proc semConv(c: PContext, n: PNode; expectedType: PType = nil): PNode =
+proc semConv(c: PContext, n: PNode; flags: TExprFlags = {}, expectedType: PType = nil): PNode =
   if n.len != 2:
     localError(c.config, n.info, "a type conversion takes exactly one argument")
     return n
@@ -358,7 +361,7 @@ proc semConv(c: PContext, n: PNode; expectedType: PType = nil): PNode =
   if n[1].kind == nkExprEqExpr and
       targetType.skipTypes(abstractPtrs).kind == tyObject:
     localError(c.config, n.info, "object construction uses ':', not '='")
-  var op = semExprWithType(c, n[1])
+  var op = semExprWithType(c, n[1], flags * {efDetermineType})
   if op.kind == nkClosedSymChoice and op.len > 0 and
       op[0].sym.kind == skEnumField: # resolves overloadedable enums
     op = ambiguousSymChoice(c, n, op)
@@ -373,7 +376,9 @@ proc semConv(c: PContext, n: PNode; expectedType: PType = nil): PNode =
   # here or needs to be overwritten too then.
   result.add op
 
-  if targetType.kind == tyGenericParam:
+  if targetType.kind == tyGenericParam or
+      (op.typ != nil and op.typ.kind == tyFromExpr and c.inGenericContext > 0):
+    # expression is compiled early in a generic body
     result.typ = makeTypeFromExpr(c, copyTree(result))
     return result
 
@@ -990,8 +995,7 @@ proc semOverloadedCallAnalyseEffects(c: PContext, n: PNode, nOrig: PNode,
 
 proc resolveIndirectCall(c: PContext; n, nOrig: PNode;
                          t: PType): TCandidate =
-  result = default(TCandidate)
-  initCandidate(c, result, t)
+  result = initCandidate(c, t)
   matches(c, n, nOrig, result)
 
 proc bracketedMacro(n: PNode): PSym =
@@ -1001,10 +1005,6 @@ proc bracketedMacro(n: PNode): PSym =
       result = nil
   else:
     result = nil
-
-proc setGenericParams(c: PContext, n: PNode) =
-  for i in 1..<n.len:
-    n[i].typ = semTypeNode(c, n[i], nil)
 
 proc afterCallActions(c: PContext; n, orig: PNode, flags: TExprFlags; expectedType: PType = nil): PNode =
   if efNoSemCheck notin flags and n.typ != nil and n.typ.kind == tyError:
@@ -1075,7 +1075,7 @@ proc semIndirectOp(c: PContext, n: PNode, flags: TExprFlags; expectedType: PType
     t = skipTypes(n[0].typ, abstractInst+{tyOwned}-{tyTypeDesc, tyDistinct})
   if t != nil and t.kind == tyTypeDesc:
     if n.len == 1: return semObjConstr(c, n, flags, expectedType)
-    return semConv(c, n)
+    return semConv(c, n, flags)
 
   let nOrig = n.copyTree
   semOpAux(c, n)
@@ -1112,7 +1112,6 @@ proc semIndirectOp(c: PContext, n: PNode, flags: TExprFlags; expectedType: PType
           msg.addDeclaredLocMaybe(c.config, typ)
           localError(c.config, n.info, msg)
         return errorNode(c, n)
-      result = nil
     else:
       result = m.call
       instGenericConvertersSons(c, result, m)
@@ -1826,6 +1825,39 @@ proc goodLineInfo(arg: PNode): TLineInfo =
   else:
     arg.info
 
+proc makeTupleAssignments(c: PContext; n: PNode): PNode =
+  ## expand tuple unpacking assignment into series of assignments
+  ## 
+  ## mirrored with semstmts.makeVarTupleSection
+  let lhs = n[0]
+  let value = semExprWithType(c, n[1], {efTypeAllowed})
+  if value.typ.kind != tyTuple:
+    localError(c.config, n[1].info, errTupleUnpackingTupleExpected %
+      [typeToString(value.typ, preferDesc)])
+  elif lhs.len != value.typ.len:
+    localError(c.config, n.info, errTupleUnpackingDifferentLengths %
+      [$lhs.len, typeToString(value.typ, preferDesc), $value.typ.len])
+  result = newNodeI(nkStmtList, n.info)
+
+  let temp = newSym(skTemp, getIdent(c.cache, "tmpTupleAsgn"), c.idgen, getCurrOwner(c), n.info)
+  temp.typ = value.typ
+  temp.flags.incl(sfGenSym)
+  var v = newNodeI(nkLetSection, value.info)
+  let tempNode = newSymNode(temp) #newIdentNode(getIdent(genPrefix & $temp.id), value.info)
+  var vpart = newNodeI(nkIdentDefs, v.info, 3)
+  vpart[0] = tempNode
+  vpart[1] = c.graph.emptyNode
+  vpart[2] = value
+  v.add vpart
+  result.add(v)
+
+  for i in 0..<lhs.len:
+    if lhs[i].kind == nkIdent and lhs[i].ident.id == ord(wUnderscore):
+      # skip _ assignments if we are using a temp as they are already evaluated
+      discard
+    else:
+      result.add newAsgnStmt(lhs[i], newTupleAccessRaw(tempNode, i))
+
 proc semAsgn(c: PContext, n: PNode; mode=asgnNormal): PNode =
   checkSonsLen(n, 2, c.config)
   var a = n[0]
@@ -1868,7 +1900,7 @@ proc semAsgn(c: PContext, n: PNode; mode=asgnNormal): PNode =
       # unfortunately we need to rewrite ``(x, y) = foo()`` already here so
       # that overloading of the assignment operator still works. Usually we
       # prefer to do these rewritings in transf.nim:
-      return semStmt(c, lowerTupleUnpackingForAsgn(c.graph, n, c.idgen, c.p.owner), {})
+      return semStmt(c, makeTupleAssignments(c, n), {})
     else:
       a = semExprWithType(c, a, {efLValue})
   else:
@@ -2117,6 +2149,7 @@ proc expectString(c: PContext, n: PNode): string =
   if n.kind in nkStrKinds:
     return n.strVal
   else:
+    result = ""
     localError(c.config, n.info, errStringLiteralExpected)
 
 proc newAnonSym(c: PContext; kind: TSymKind, info: TLineInfo): PSym =
@@ -3123,7 +3156,7 @@ proc semExpr(c: PContext, n: PNode, flags: TExprFlags = {}, expectedType: PType 
         # XXX think about this more (``set`` procs)
         let ambig = c.isAmbiguous
         if not (n[0].kind in {nkClosedSymChoice, nkOpenSymChoice, nkIdent} and ambig) and n.len == 2:
-          result = semConv(c, n, expectedType)
+          result = semConv(c, n, flags, expectedType)
         elif ambig and n.len == 1:
           errorUseQualifier(c, n.info, s)
         elif n.len == 1:
