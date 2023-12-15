@@ -1593,11 +1593,14 @@ iterator tupleTypePairs*(a, b: PType): (int, PType, PType) =
 
 iterator underspecifiedPairs*(a, b: PType; start = 0; without = 0): (PType, PType) =
   # XXX Figure out with what typekinds this is called.
-  for i in start ..< a.sons.len + without:
+  for i in start ..< min(a.sons.len, b.sons.len) + without:
     yield (a.sons[i], b.sons[i])
 
 proc signatureLen*(t: PType): int {.inline.} =
   result = t.sons.len
+
+proc paramsLen*(t: PType): int {.inline.} =
+  result = t.sons.len - 1
 
 proc kidsLen*(t: PType): int {.inline.} =
   result = t.sons.len
@@ -1629,9 +1632,13 @@ iterator ikids*(t: PType): (int, PType) =
 
 const
   FirstParamAt* = 1
+  FirstGenericParamAt* = 1
 
 iterator paramTypes*(t: PType): (int, PType) =
   for i in FirstParamAt..<t.sons.len: yield (i, t.sons[i])
+
+iterator paramTypePairs*(a, b: PType): (PType, PType) =
+  for i in FirstParamAt..<a.sons.len: yield (a.sons[i], b.sons[i])
 
 template paramTypeToNodeIndex*(x: int): int = x
 
@@ -2033,13 +2040,15 @@ proc skipGenericOwner*(s: PSym): PSym =
   ## Generic instantiations are owned by their originating generic
   ## symbol. This proc skips such owners and goes straight to the owner
   ## of the generic itself (the module or the enclosing proc).
-  result = if s.kind in skProcKinds and sfFromGeneric in s.flags and s.owner.kind != skModule:
+  result = if s.kind == skModule:
+            s 
+           elif s.kind in skProcKinds and sfFromGeneric in s.flags and s.owner.kind != skModule:
              s.owner.owner
            else:
              s.owner
 
 proc originatingModule*(s: PSym): PSym =
-  result = s.owner
+  result = s
   while result.kind != skModule: result = result.owner
 
 proc isRoutine*(s: PSym): bool {.inline.} =

@@ -135,15 +135,7 @@ proc initCandidate*(ctx: PContext, callee: PSym,
   result = initCandidateAux(ctx, callee.typ)
   result.calleeSym = callee
   if callee.kind in skProcKinds and calleeScope == -1:
-    if callee.originatingModule == ctx.module:
-      result.calleeScope = 2
-      var owner = callee
-      while true:
-        owner = owner.skipGenericOwner
-        if owner.kind == skModule: break
-        inc result.calleeScope
-    else:
-      result.calleeScope = 1
+    result.calleeScope = cmpScopes(ctx, callee)
   else:
     result.calleeScope = calleeScope
   result.diagnostics = @[] # if diagnosticsEnabled: @[] else: nil
@@ -192,11 +184,11 @@ proc checkGeneric(a, b: TCandidate): int =
   let aa = a.callee
   let bb = b.callee
   var winner = 0
-  for i in 1..<min(aa.len, bb.len):
-    var ma = newCandidate(c, bb[i])
-    let tra = typeRel(ma, bb[i], aa[i], {trDontBind})
-    var mb = newCandidate(c, aa[i])
-    let trb = typeRel(mb, aa[i], bb[i], {trDontBind})
+  for aai, bbi in underspecifiedPairs(aa, bb, 1):
+    var ma = newCandidate(c, bbi)
+    let tra = typeRel(ma, bbi, aai, {trDontBind})
+    var mb = newCandidate(c, aai)
+    let trb = typeRel(mb, aai, bbi, {trDontBind})
     if tra == isGeneric and trb == isNone:
       if winner == -1: return 0
       winner = 1
@@ -267,9 +259,9 @@ proc sumGeneric(t: PType): int =
 proc complexDisambiguation(a, b: PType): int =
   # 'a' matches better if *every* argument matches better or equal than 'b'.
   var winner = 0
-  for i in 1..<min(a.len, b.len):
-    let x = a[i].sumGeneric
-    let y = b[i].sumGeneric
+  for ai, bi in underspecifiedPairs(a, b, 1):
+    let x = ai.sumGeneric
+    let y = bi.sumGeneric
     if x != y:
       if winner == 0:
         if x > y: winner = 1
@@ -284,8 +276,8 @@ proc complexDisambiguation(a, b: PType): int =
   result = winner
   when false:
     var x, y: int
-    for i in 1..<a.len: x += a[i].sumGeneric
-    for i in 1..<b.len: y += b[i].sumGeneric
+    for i in 1..<a.len: x += ai.sumGeneric
+    for i in 1..<b.len: y += bi.sumGeneric
     result = x - y
 
 proc writeMatches*(c: TCandidate) =
@@ -297,7 +289,7 @@ proc writeMatches*(c: TCandidate) =
   echo "  conv matches: ", c.convMatches
   echo "  inheritance: ", c.inheritancePenalty
 
-proc cmpCandidates*(a, b: TCandidate): int =
+proc cmpCandidates*(a, b: TCandidate, isFormal=true): int =
   result = a.exactMatches - b.exactMatches
   if result != 0: return
   result = a.genericMatches - b.genericMatches
@@ -311,13 +303,14 @@ proc cmpCandidates*(a, b: TCandidate): int =
   # the other way round because of other semantics:
   result = b.inheritancePenalty - a.inheritancePenalty
   if result != 0: return
-  # check for generic subclass relation
-  result = checkGeneric(a, b)
+  if isFormal:
+    # check for generic subclass relation
+    result = checkGeneric(a, b)
+    if result != 0: return
+    # prefer more specialized generic over more general generic:
+    result = complexDisambiguation(a.callee, b.callee)
   if result != 0: return
-  # prefer more specialized generic over more general generic:
-  result = complexDisambiguation(a.callee, b.callee)
   # only as a last resort, consider scoping:
-  if result != 0: return
   result = a.calleeScope - b.calleeScope
 
 proc argTypeToString(arg: PNode; prefer: TPreferedDesc): string =
@@ -382,7 +375,7 @@ proc concreteType(c: TCandidate, t: PType; f: PType = nil): PType =
   of tyOwned:
     # bug #11257: the comparison system.`==`[T: proc](x, y: T) works
     # better without the 'owned' type:
-    if f != nil and f.len > 0 and f[0].skipTypes({tyBuiltInTypeClass, tyOr}).kind == tyProc:
+    if f != nil and f.hasElementType and f.elementType.skipTypes({tyBuiltInTypeClass, tyOr}).kind == tyProc:
       result = t.skipModifier
     else:
       result = t
@@ -475,10 +468,10 @@ proc getObjectTypeOrNil(f: PType): PType =
   if f == nil: return nil
   case f.kind:
   of tyGenericInvocation, tyCompositeTypeClass, tyAlias:
-    if f.len <= 0 or f[0] == nil:
+    if not f.hasElementType or f.elementType == nil:
       result = nil
     else:
-      result = getObjectTypeOrNil(f[0])
+      result = getObjectTypeOrNil(f.elementType)
   of tyGenericInst:
     result = getObjectTypeOrNil(f.skipModifier)
   of tyGenericBody:
@@ -503,8 +496,8 @@ proc getObjectTypeOrNil(f: PType): PType =
 
 proc genericParamPut(c: var TCandidate; last, fGenericOrigin: PType) =
   if fGenericOrigin != nil and last.kind == tyGenericInst and
-     last.len-1 == fGenericOrigin.len:
-    for i in 1..<fGenericOrigin.len:
+     last.kidsLen-1 == fGenericOrigin.kidsLen:
+    for i in FirstGenericParamAt..<fGenericOrigin.kidsLen:
       let x = PType(idTableGet(c.bindings, fGenericOrigin[i]))
       if x == nil:
         put(c, fGenericOrigin[i], last[i])
@@ -538,7 +531,7 @@ proc skipToObject(t: PType; skipped: var SkippedPtr): PType =
   while r != nil:
     case r.kind
     of tyGenericInvocation:
-      r = r[0]
+      r = r.genericHead
     of tyRef:
       inc ptrs
       skipped = skippedRef
@@ -588,12 +581,12 @@ proc recordRel(c: var TCandidate, f, a: PType): TTypeRelation =
   result = isNone
   if sameType(f, a):
     result = isEqual
-  elif a.len == f.len:
+  elif sameTupleLengths(a, f):
     result = isEqual
     let firstField = if f.kind == tyTuple: 0
                      else: 1
-    for i in firstField..<f.len:
-      var m = typeRel(c, f[i], a[i])
+    for _, ff, aa in tupleTypePairs(f, a):
+      var m = typeRel(c, ff, aa)
       if m < isSubtype: return isNone
       result = minRel(result, m)
     if f.n != nil and a.n != nil:
@@ -616,7 +609,7 @@ proc inconsistentVarTypes(f, a: PType): bool {.inline.} =
     (f.kind in {tyVar, tyLent, tySink} or a.kind in {tyVar, tyLent, tySink})) or
     isOutParam(f) != isOutParam(a)
 
-proc procParamTypeRel(c: var TCandidate, f, a: PType): TTypeRelation =
+proc procParamTypeRel(c: var TCandidate; f, a: PType): TTypeRelation =
   ## For example we have:
   ##   ```nim
   ##   proc myMap[T,S](sIn: seq[T], f: proc(x: T): S): seq[S] = ...
@@ -676,7 +669,7 @@ proc procParamTypeRel(c: var TCandidate, f, a: PType): TTypeRelation =
 proc procTypeRel(c: var TCandidate, f, a: PType): TTypeRelation =
   case a.kind
   of tyProc:
-    if f.len != a.len: return
+    if f.signatureLen != a.signatureLen: return
     result = isEqual      # start with maximum; also correct for no
                           # params at all
 
@@ -734,7 +727,7 @@ proc matchUserTypeClass*(m: var TCandidate; ff, a: PType): PType =
     c = m.c
     typeClass = ff.skipTypes({tyUserTypeClassInst})
     body = typeClass.n[3]
-    matchedConceptContext: TMatchedConcept
+    matchedConceptContext = TMatchedConcept()
     prevMatchedConcept = c.matchedConcept
     prevCandidateType = typeClass[0][0]
 
@@ -1200,7 +1193,7 @@ proc typeRel(c: var TCandidate, f, aOrig: PType,
       # being passed as parameters
       return isNone
   else: discard
-  
+
   case f.kind
   of tyEnum:
     if a.kind == f.kind and sameEnumTypes(f, a): result = isEqual
@@ -2353,56 +2346,76 @@ proc paramTypesMatch*(m: var TCandidate, f, a: PType,
   if arg == nil or arg.kind notin nkSymChoices:
     result = paramTypesMatchAux(m, f, a, arg, argOrig)
   else:
-    # CAUTION: The order depends on the used hashing scheme. Thus it is
-    # incorrect to simply use the first fitting match. However, to implement
-    # this correctly is inefficient. We have to copy `m` here to be able to
-    # roll back the side effects of the unification algorithm.
-    let c = m.c
-    var
-      x = newCandidate(c, m.callee)
-      y = newCandidate(c, m.callee)
-      z = newCandidate(c, m.callee)
-    x.calleeSym = m.calleeSym
-    y.calleeSym = m.calleeSym
-    z.calleeSym = m.calleeSym
+    let matchSet = {skProc, skFunc, skMethod, skConverter,skIterator, skMacro,
+                    skTemplate, skEnumField}
+    
     var best = -1
-    for i in 0..<arg.len:
-      if arg[i].sym.kind in {skProc, skFunc, skMethod, skConverter,
-                             skIterator, skMacro, skTemplate, skEnumField}:
-        copyCandidate(z, m)
-        z.callee = arg[i].typ
-        if tfUnresolved in z.callee.flags: continue
-        z.calleeSym = arg[i].sym
-        # XXX this is still all wrong: (T, T) should be 2 generic matches
-        # and  (int, int) 2 exact matches, etc. Essentially you cannot call
-        # typeRel here and expect things to work!
-        let r = staticAwareTypeRel(z, f, arg[i])
-        incMatches(z, r, 2)
-        if r != isNone:
-          z.state = csMatch
-          case x.state
-          of csEmpty, csNoMatch:
-            x = z
+    result = arg
+    
+    if f.kind in {tyTyped, tyUntyped}:
+      var
+        bestScope = -1
+        counts = 0
+      for i in 0..<arg.len:
+        if arg[i].sym.kind in matchSet:
+          let thisScope = cmpScopes(m.c, arg[i].sym)
+          if thisScope > bestScope:
             best = i
-          of csMatch:
-            let cmp = cmpCandidates(x, z)
-            if cmp < 0:
-              best = i
-              x = z
-            elif cmp == 0:
-              y = z           # z is as good as x
-
-    if x.state == csEmpty:
-      result = nil
-    elif y.state == csMatch and cmpCandidates(x, y) == 0:
-      if x.state != csMatch:
-        internalError(m.c.graph.config, arg.info, "x.state is not csMatch")
-      # ambiguous: more than one symbol fits!
-      # See tsymchoice_for_expr as an example. 'f.kind == tyUntyped' should match
-      # anyway:
-      if f.kind in {tyUntyped, tyTyped}: result = arg
-      else: result = nil
+            bestScope = thisScope
+            counts = 0
+          elif thisScope == bestScope:
+            inc counts
+      if best == -1:
+        result = nil
+      elif counts > 0:
+        best = -1
     else:
+      # CAUTION: The order depends on the used hashing scheme. Thus it is
+      # incorrect to simply use the first fitting match. However, to implement
+      # this correctly is inefficient. We have to copy `m` here to be able to
+      # roll back the side effects of the unification algorithm.
+      let c = m.c
+      var
+        x = newCandidate(c, m.callee)
+        y = newCandidate(c, m.callee)
+        z = newCandidate(c, m.callee)
+      x.calleeSym = m.calleeSym
+      y.calleeSym = m.calleeSym
+      z.calleeSym = m.calleeSym
+      
+      for i in 0..<arg.len:
+        if arg[i].sym.kind in matchSet:
+          copyCandidate(z, m)
+          z.callee = arg[i].typ
+          if tfUnresolved in z.callee.flags: continue
+          z.calleeSym = arg[i].sym
+          z.calleeScope = cmpScopes(m.c, arg[i].sym)
+          # XXX this is still all wrong: (T, T) should be 2 generic matches
+          # and  (int, int) 2 exact matches, etc. Essentially you cannot call
+          # typeRel here and expect things to work!
+          let r = staticAwareTypeRel(z, f, arg[i])
+          incMatches(z, r, 2)
+          if r != isNone:
+            z.state = csMatch
+            case x.state
+            of csEmpty, csNoMatch:
+              x = z
+              best = i
+            of csMatch:
+              let cmp = cmpCandidates(x, z, isFormal=false)
+              if cmp < 0:
+                best = i
+                x = z
+              elif cmp == 0:
+                y = z           # z is as good as x
+
+      if x.state == csEmpty:
+        result = nil
+      elif y.state == csMatch and cmpCandidates(x, y, isFormal=false) == 0:
+        if x.state != csMatch:
+          internalError(m.c.graph.config, arg.info, "x.state is not csMatch")
+        result = nil
+    if best > -1 and result != nil:
       # only one valid interpretation found:
       markUsed(m.c, arg.info, arg[best].sym)
       onUse(arg.info, arg[best].sym)

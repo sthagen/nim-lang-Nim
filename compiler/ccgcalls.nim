@@ -237,8 +237,7 @@ proc openArrayLoc(p: BProc, formalType: PType, n: PNode; result: var Rope) =
           optSeqDestructors in p.config.globalOptions:
         linefmt(p, cpsStmts, "#nimPrepareStrMutationV2($1);$n", [byRefLoc(p, a)])
       if ntyp.kind in {tyVar} and not compileToCpp(p.module):
-        var t: TLoc
-        t.r = "(*$1)" % [a.rdLoc]
+        var t = TLoc(r: "(*$1)" % [a.rdLoc])
         result.add "($4) ? ((*$1)$3) : NIM_NIL, $2" %
                      [a.rdLoc, lenExpr(p, t), dataField(p),
                       dataFieldAccessor(p, "*" & a.rdLoc)]
@@ -250,8 +249,7 @@ proc openArrayLoc(p: BProc, formalType: PType, n: PNode; result: var Rope) =
     of tyPtr, tyRef:
       case elementType(a.t).kind
       of tyString, tySequence:
-        var t: TLoc
-        t.r = "(*$1)" % [a.rdLoc]
+        var t = TLoc(r: "(*$1)" % [a.rdLoc])
         result.add "($4) ? ((*$1)$3) : NIM_NIL, $2" %
                      [a.rdLoc, lenExpr(p, t), dataField(p),
                       dataFieldAccessor(p, "*" & a.rdLoc)]
@@ -396,7 +394,7 @@ proc genParams(p: BProc, ri: PNode, typ: PType; result: var Rope) =
 
   var oldLen = result.len
   for i in 1..<ri.len:
-    if i < typ.len:
+    if i < typ.n.len:
       assert(typ.n[i].kind == nkSym)
       let paramType = typ.n[i]
       if not paramType.typ.isCompileTimeOnly:
@@ -421,7 +419,6 @@ proc genPrefixCall(p: BProc, le, ri: PNode, d: var TLoc) =
   # getUniqueType() is too expensive here:
   var typ = skipTypes(ri[0].typ, abstractInstOwned)
   assert(typ.kind == tyProc)
-  assert(typ.len == typ.n.len)
 
   var params = newRopeAppender()
   genParams(p, ri, typ, params)
@@ -444,7 +441,6 @@ proc genClosureCall(p: BProc, le, ri: PNode, d: var TLoc) =
   # getUniqueType() is too expensive here:
   var typ = skipTypes(ri[0].typ, abstractInstOwned)
   assert(typ.kind == tyProc)
-  assert(typ.len == typ.n.len)
 
   var pl = newRopeAppender()
   genParams(p, ri, typ, pl)
@@ -504,14 +500,14 @@ proc genClosureCall(p: BProc, le, ri: PNode, d: var TLoc) =
 
 proc genOtherArg(p: BProc; ri: PNode; i: int; typ: PType; result: var Rope;
                  argsCounter: var int) =
-  if i < typ.len:
+  if i < typ.n.len:
     # 'var T' is 'T&' in C++. This means we ignore the request of
     # any nkHiddenAddr when it's a 'var T'.
     let paramType = typ.n[i]
     assert(paramType.kind == nkSym)
     if paramType.typ.isCompileTimeOnly:
       discard
-    elif typ[i].kind in {tyVar} and ri[i].kind == nkHiddenAddr:
+    elif paramType.typ.kind in {tyVar} and ri[i].kind == nkHiddenAddr:
       if argsCounter > 0: result.add ", "
       genArgNoParam(p, ri[i][0], result)
       inc argsCounter
@@ -586,7 +582,7 @@ proc genThisArg(p: BProc; ri: PNode; i: int; typ: PType; result: var Rope) =
   # for better or worse c2nim translates the 'this' argument to a 'var T'.
   # However manual wrappers may also use 'ptr T'. In any case we support both
   # for convenience.
-  internalAssert p.config, i < typ.len
+  internalAssert p.config, i < typ.n.len
   assert(typ.n[i].kind == nkSym)
   # if the parameter is lying (tyVar) and thus we required an additional deref,
   # skip the deref:
@@ -676,7 +672,6 @@ proc genInfixCall(p: BProc, le, ri: PNode, d: var TLoc) =
   # getUniqueType() is too expensive here:
   var typ = skipTypes(ri[0].typ, abstractInst)
   assert(typ.kind == tyProc)
-  assert(typ.len == typ.n.len)
   # don't call '$' here for efficiency:
   let pat = $ri[0].sym.loc.r
   internalAssert p.config, pat.len > 0
@@ -710,7 +705,6 @@ proc genInfixCall(p: BProc, le, ri: PNode, d: var TLoc) =
     pl.add(op.r)
     var params = newRopeAppender()
     for i in 2..<ri.len:
-      assert(typ.len == typ.n.len)
       genOtherArg(p, ri, i, typ, params, argsCounter)
     fixupCall(p, le, ri, d, pl, params)
 
@@ -721,7 +715,6 @@ proc genNamedParamCall(p: BProc, ri: PNode, d: var TLoc) =
   # getUniqueType() is too expensive here:
   var typ = skipTypes(ri[0].typ, abstractInst)
   assert(typ.kind == tyProc)
-  assert(typ.len == typ.n.len)
 
   # don't call '$' here for efficiency:
   let pat = $ri[0].sym.loc.r
@@ -743,8 +736,7 @@ proc genNamedParamCall(p: BProc, ri: PNode, d: var TLoc) =
       pl.add(": ")
       genArg(p, ri[2], typ.n[2].sym, ri, pl)
   for i in start..<ri.len:
-    assert(typ.len == typ.n.len)
-    if i >= typ.len:
+    if i >= typ.n.len:
       internalError(p.config, ri.info, "varargs for objective C method?")
     assert(typ.n[i].kind == nkSym)
     var param = typ.n[i].sym
