@@ -2520,6 +2520,8 @@ when hasAlloc or defined(nimscript):
     ##   var a = "abc"
     ##   a.insert("zz", 0) # a <- "zzabc"
     ##   ```
+    if item.len == 0: # prevents self-assignment
+      return
     var xl = x.len
     setLen(x, xl+item.len)
     var j = xl-1
@@ -2926,4 +2928,5 @@ proc arrayWith*[T](y: T, size: static int): array[size, T] {.raises: [].} =
     when nimvm:
       result[i] = y
     else:
-      result[i] = `=dup`(y)
+      # TODO: fixme it should be `=dup`
+      result[i] = y
