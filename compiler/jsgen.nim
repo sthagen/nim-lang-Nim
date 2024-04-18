@@ -110,7 +110,6 @@ type
     unique: int    # for temp identifier generation
     blocks: seq[TBlock]
     extraIndent: int
-    declaredGlobals: IntSet
     previousFileName: string  # For frameInfo inside templates.
 
 template config*(p: PProc): ConfigRef = p.module.config
@@ -168,10 +167,6 @@ proc initProcOptions(module: BModule): TOptions =
 
 proc newInitProc(globals: PGlobals, module: BModule): PProc =
   result = newProc(globals, module, nil, initProcOptions(module))
-
-proc declareGlobal(p: PProc; id: int; r: Rope) =
-  if p.prc != nil and not p.declaredGlobals.containsOrIncl(id):
-    p.locals.addf("global $1;$n", [r])
 
 const
   MappedToObject = {tyObject, tyArray, tyTuple, tyOpenArray,
@@ -1023,7 +1018,7 @@ proc genCaseJS(p: PProc, n: PNode, r: var TCompRes) =
     a, b, cond, stmt: TCompRes = default(TCompRes)
   genLineDir(p, n)
   gen(p, n[0], cond)
-  let typeKind = skipTypes(n[0].typ, abstractVar).kind
+  let typeKind = skipTypes(n[0].typ, abstractVar+{tyRange}).kind
   var transferRange = false
   let anyString = typeKind in {tyString, tyCstring}
   case typeKind
@@ -2137,20 +2132,20 @@ proc genConStrStr(p: PProc, n: PNode, r: var TCompRes) =
   if skipTypes(n[1].typ, abstractVarRange).kind == tyChar:
     r.res.add("[$1].concat(" % [a.res])
   else:
-    r.res.add("($1 || []).concat(" % [a.res])
+    r.res.add("($1).concat(" % [a.res])
 
   for i in 2..<n.len - 1:
     gen(p, n[i], a)
     if skipTypes(n[i].typ, abstractVarRange).kind == tyChar:
       r.res.add("[$1]," % [a.res])
     else:
-      r.res.add("$1 || []," % [a.res])
+      r.res.add("$1," % [a.res])
 
   gen(p, n[^1], a)
   if skipTypes(n[^1].typ, abstractVarRange).kind == tyChar:
     r.res.add("[$1])" % [a.res])
   else:
-    r.res.add("$1 || [])" % [a.res])
+    r.res.add("$1)" % [a.res])
 
 proc genReprAux(p: PProc, n: PNode, r: var TCompRes, magic: string, typ: Rope = "") =
   useMagic(p, magic)
@@ -2993,11 +2988,8 @@ proc gen(p: PProc, n: PNode, r: var TCompRes) =
   of nkRaiseStmt: genRaiseStmt(p, n)
   of nkTypeSection, nkCommentStmt, nkIncludeStmt,
      nkImportStmt, nkImportExceptStmt, nkExportStmt, nkExportExceptStmt,
-     nkFromStmt, nkTemplateDef, nkMacroDef, nkStaticStmt,
+     nkFromStmt, nkTemplateDef, nkMacroDef, nkIteratorDef, nkStaticStmt,
      nkMixinStmt, nkBindStmt: discard
-  of nkIteratorDef:
-    if n[0].sym.typ.callConv == TCallingConvention.ccClosure:
-      globalError(p.config, n.info, "Closure iterators are not supported by JS backend!")
   of nkPragma: genPragma(p, n)
   of nkProcDef, nkFuncDef, nkMethodDef, nkConverterDef:
     var s = n[namePos].sym
@@ -3005,7 +2997,18 @@ proc gen(p: PProc, n: PNode, r: var TCompRes) =
       genSym(p, n[namePos], r)
       r.res = ""
   of nkGotoState, nkState:
-    globalError(p.config, n.info, "First class iterators not implemented")
+    globalError(p.config, n.info, "not implemented")
+  of nkBreakState:
+    var a: TCompRes = default(TCompRes)
+    if n[0].kind == nkClosure:
+      gen(p, n[0][1], a)
+      let sym = n[0][1].typ[0].n[0].sym
+      r.res = "(($1).$2 < 0)" % [rdLoc(a), mangleName(p.module, sym)]
+    else:
+      gen(p, n[0], a)
+      let sym = n[0].typ[0].n[0].sym
+      r.res = "((($1.ClE_0).$2) < 0)" % [rdLoc(a), mangleName(p.module, sym)]
+    r.kind = resExpr
   of nkPragmaBlock: gen(p, n.lastSon, r)
   of nkComesFrom:
     discard "XXX to implement for better stack traces"
@@ -3111,15 +3114,6 @@ proc wholeCode(graph: ModuleGraph; m: BModule): Rope =
       attachProc(p, prc)
 
   result = globals.typeInfo & globals.constants & globals.code
-
-proc getClassName(t: PType): Rope =
-  var s = t.sym
-  if s.isNil or sfAnon in s.flags:
-    s = skipTypes(t, abstractPtrs).sym
-  if s.isNil or sfAnon in s.flags:
-    doAssert(false, "cannot retrieve class name")
-  if s.loc.r != "": result = s.loc.r
-  else: result = rope(s.name.s)
 
 proc finalJSCodeGen*(graph: ModuleGraph; b: PPassContext, n: PNode): PNode =
   ## Finalize JS code generation of a Nim module.
