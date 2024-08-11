@@ -173,8 +173,10 @@ proc semOpenSym(c: PContext, n: PNode, s: PSym, flags: TExprFlags, expectedType:
   # enough to replace the original
   # for `nkOpenSymChoice`, the first found symbol must be non-overloadable,
   # since otherwise we have to use regular `nkOpenSymChoice` functionality
+  # but of the overloadable sym kinds, semExpr does not handle skModule, skMacro, skTemplate
+  # as overloaded in the case where `nkIdent` finds them first
   if s2 != nil and not c.isAmbiguous and
-      ((s == nil and s2.kind notin OverloadableSyms) or
+      ((s == nil and s2.kind notin OverloadableSyms-{skModule, skMacro, skTemplate}) or
         (s != nil and s2 != s)):
     # only consider symbols defined under current proc:
     var o = s2.owner
@@ -201,6 +203,9 @@ proc semOpenSym(c: PContext, n: PNode, s: PSym, flags: TExprFlags, expectedType:
           message(c.config, n.info, warnGenericsIgnoredInjection, msg)
           break
       o = o.owner
+  if s == nil:
+    # set symchoice node type back to None
+    n.typ = newTypeS(tyNone, c)
 
 proc inlineConst(c: PContext, n: PNode, s: PSym): PNode {.inline.} =
   result = copyTree(s.astdef)
@@ -270,7 +275,8 @@ proc checkConvertible(c: PContext, targetTyp: PType, src: PNode): TConvStatus =
       discard "convOk"
     elif targetTyp.isOrdinalType:
       if src.kind in nkCharLit..nkUInt64Lit and
-          src.getInt notin firstOrd(c.config, targetTyp)..lastOrd(c.config, targetTyp):
+          src.getInt notin firstOrd(c.config, targetTyp)..lastOrd(c.config, targetTyp) and
+          targetTyp.kind notin {tyUInt..tyUInt64}:
         result = convNotInRange
       elif src.kind in nkFloatLit..nkFloat64Lit and
           (classify(src.floatVal) in {fcNan, fcNegInf, fcInf} or
@@ -2003,7 +2009,7 @@ proc semAsgn(c: PContext, n: PNode; mode=asgnNormal): PNode =
         if rhsTyp.kind in tyUserTypeClasses and rhsTyp.isResolvedUserTypeClass:
           rhsTyp = rhsTyp.last
         if lhs.sym.typ.kind == tyAnything:
-          rhsTyp = rhsTyp.skipIntLit(c.idgen)
+          rhsTyp = rhsTyp.skipTypes({tySink}).skipIntLit(c.idgen)
         if cmpTypes(c, lhs.typ, rhsTyp) in {isGeneric, isEqual}:
           internalAssert c.config, c.p.resultSym != nil
           # Make sure the type is valid for the result variable
@@ -2825,7 +2831,7 @@ proc semTupleFieldsConstr(c: PContext, n: PNode, flags: TExprFlags; expectedType
       n[i][1].typ = errorType(c)
 
     var f = newSymS(skField, n[i][0], c)
-    f.typ = skipIntLit(n[i][1].typ, c.idgen)
+    f.typ = skipIntLit(n[i][1].typ.skipTypes({tySink}), c.idgen)
     f.position = i
     rawAddSon(typ, f.typ)
     typ.n.add newSymNode(f)
@@ -2851,7 +2857,7 @@ proc semTuplePositionsConstr(c: PContext, n: PNode, flags: TExprFlags; expectedT
       # `const foo = [(1, {}), (2, {false})]`,
       # `const foo = if true: (0, nil) else: (1, new(int))`
       n[i] = fitNode(c, expectedElemType, n[i], n[i].info)
-    addSonSkipIntLit(typ, n[i].typ, c.idgen)
+    addSonSkipIntLit(typ, n[i].typ.skipTypes({tySink}), c.idgen)
   result.typ = typ
 
 include semobjconstr
