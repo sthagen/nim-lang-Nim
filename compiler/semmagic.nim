@@ -68,7 +68,7 @@ proc semArrGet(c: PContext; n: PNode; flags: TExprFlags): PNode =
   if result.isNil:
     let x = copyTree(n)
     x[0] = newIdentNode(getIdent(c.cache, "[]"), n.info)
-    bracketNotFoundError(c, x)
+    bracketNotFoundError(c, x, flags)
     #localError(c.config, n.info, "could not resolve: " & $n)
     result = errorNode(c, n)
 
@@ -226,8 +226,9 @@ proc evalTypeTrait(c: PContext; traitCall: PNode, operand: PType, context: PSym)
   of "rangeBase":
     # return the base type of a range type
     var arg = operand.skipTypes({tyGenericInst})
-    assert arg.kind == tyRange
-    result = getTypeDescNode(c, arg.base, operand.owner, traitCall.info)
+    if arg.kind == tyRange:
+      arg = arg.base
+    result = getTypeDescNode(c, arg, operand.owner, traitCall.info)
   of "isCyclic":
     var operand = operand.skipTypes({tyGenericInst})
     let isCyclic = canFormAcycle(c.graph, operand)

@@ -279,7 +279,8 @@ proc checkConvertible(c: PContext, targetTyp: PType, src: PNode): TConvStatus =
     result = checkConversionBetweenObjects(d.skipTypes(abstractInst), s.skipTypes(abstractInst), pointers)
   elif (targetBaseTyp.kind in IntegralTypes) and
       (srcBaseTyp.kind in IntegralTypes):
-    if targetTyp.kind == tyEnum and srcBaseTyp.kind == tyEnum:
+    if targetTyp.kind == tyEnum and srcBaseTyp.kind == tyEnum and
+        not sameType(targetTyp, srcBaseTyp):
       message(c.config, src.info, warnSuspiciousEnumConv, "suspicious code: enum to enum conversion")
     # `elif` would be incorrect here
     if targetTyp.kind == tyBool:
@@ -1992,7 +1993,7 @@ proc semAsgn(c: PContext, n: PNode; mode=asgnNormal): PNode =
       result = buildOverloadedSubscripts(n[0], getIdent(c.cache, "[]="))
       result.add(n[1])
       if mode == noOverloadedSubscript:
-        bracketNotFoundError(c, result)
+        bracketNotFoundError(c, result, {})
         return errorNode(c, n)
       else:
         result = semExprNoType(c, result)
@@ -2684,6 +2685,7 @@ proc semWhen(c: PContext, n: PNode, semCheck = true): PNode =
       whenNimvm = exprNode.sym.magic == mNimvm
     if whenNimvm: n.flags.incl nfLL
 
+  var cannotResolve = false
   for i in 0..<n.len:
     var it = n[i]
     case it.kind
@@ -2694,6 +2696,20 @@ proc semWhen(c: PContext, n: PNode, semCheck = true): PNode =
           it[1] = semExpr(c, it[1], flags)
           typ = commonType(c, typ, it[1].typ)
         result = n # when nimvm is not elimited until codegen
+      elif c.inGenericContext > 0:
+        let e = semExprWithType(c, it[0])
+        if e.typ.kind == tyFromExpr:
+          it[0] = makeStaticExpr(c, e)
+          cannotResolve = true
+        else:
+          it[0] = forceBool(c, e)
+          let val = getConstExpr(c.module, it[0], c.idgen, c.graph)
+          if val == nil or val.kind != nkIntLit:
+            cannotResolve = true
+          elif not cannotResolve and val.intVal != 0 and result == nil:
+            setResult(it[1])
+            return # we're not in nimvm and we already have a result
+        it[1] = semGenericStmt(c, it[1])
       else:
         let e = forceBool(c, semConstExpr(c, it[0]))
         if e.kind != nkIntLit:
@@ -2705,7 +2721,9 @@ proc semWhen(c: PContext, n: PNode, semCheck = true): PNode =
           return # we're not in nimvm and we already have a result
     of nkElse, nkElseExpr:
       checkSonsLen(it, 1, c.config)
-      if result == nil or whenNimvm:
+      if cannotResolve:
+        it[0] = semGenericStmt(c, it[0])
+      elif result == nil or whenNimvm:
         if semCheck:
           it[0] = semExpr(c, it[0], flags)
           typ = commonType(c, typ, it[0].typ)
@@ -2714,6 +2732,10 @@ proc semWhen(c: PContext, n: PNode, semCheck = true): PNode =
         if result == nil:
           result = it[0]
     else: illFormedAst(n, c.config)
+  if cannotResolve:
+    result = n
+    result.typ = makeTypeFromExpr(c, result.copyTree)
+    return
   if result == nil:
     result = newNodeI(nkEmpty, n.info)
   if whenNimvm:
@@ -3083,7 +3105,11 @@ proc hoistParamsUsedInDefault(c: PContext, call, letSection, defExpr: var PNode)
   # duty is activated by returning a non-nil value. The caller is responsible
   # for replacing the input to the function with the returned non-nil value.
   # (which is the hoisted symbol)
-  if defExpr.kind == nkSym and defExpr.sym.kind == skParam and defExpr.sym.owner == call[0].sym:
+  if defExpr.kind == nkSym and defExpr.sym.kind == skParam and
+      (defExpr.sym.owner == call[0].sym or
+        # symbol was resolved before proc was instantiated:
+        (sfFromGeneric in call[0].sym.flags and
+          defExpr.sym.owner == call[0].sym.instantiatedFrom)):
     let paramPos = defExpr.sym.position + 1
 
     if call[paramPos].skipAddr.kind != nkSym and not (
