@@ -19,6 +19,8 @@
 
 - JS backend now supports lambda lifting for closures. Use `--legacy:jsNoLambdaLifting` to emulate old behavior.
 
+- JS backend now supports closure iterators.
+
 - `owner` in `std/macros` is deprecated.
 
 - Ambiguous type symbols in generic procs and templates now generate symchoice nodes.
@@ -40,6 +42,26 @@
 
   bar[int]() # before: (1.0, "abc"), now: type mismatch, missing generic parameter
   ```
+
+- `const` values now open a new scope for each constant, meaning symbols
+  declared in them can no longer be used outside or in the value of
+  other constants.
+
+  ```nim
+  const foo = (var a = 1; a)
+  const bar = a # error
+  let baz = a # error
+  ```
+- The following POSIX wrappers have had their types changed from signed to
+  unsigned types on OSX and FreeBSD/OpenBSD to correct codegen errors:
+  - `Gid` (was `int32`, is now `uint32`)
+  - `Uid` (was `int32`, is now `uint32`)
+  - `Dev` (was `int32`, is now `uint32` on FreeBSD)
+  - `Nlink` (was `int16`, is now `uint32` on OpenBSD and `uint16` on OSX/other BSD)
+  - `sin6_flowinfo` and `sin6_scope_id` fields of `Sockaddr_in6`
+    (were `int32`, are now `uint32`)
+  - `n_net` field of `Tnetent` (was `int32`, is now `uint32`)
+
 
 ## Standard library additions and changes
 
