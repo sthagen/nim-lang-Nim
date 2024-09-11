@@ -232,7 +232,11 @@ proc iterOverTypeAux(marker: var IntSet, t: PType, iter: TTypeIter,
   if result: return
   if not containsOrIncl(marker, t.id):
     case t.kind
-    of tyGenericInst, tyGenericBody, tyAlias, tySink, tyInferred:
+    of tyGenericBody:
+      # treat as atomic, containsUnresolvedType wants always false,
+      # containsGenericType always gives true
+      discard
+    of tyGenericInst, tyAlias, tySink, tyInferred:
       result = iterOverTypeAux(marker, skipModifier(t), iter, closure)
     else:
       for a in t.kids:
@@ -1493,6 +1497,23 @@ proc containsGenericTypeIter(t: PType, closure: RootRef): bool =
 
 proc containsGenericType*(t: PType): bool =
   result = iterOverType(t, containsGenericTypeIter, nil)
+
+proc containsUnresolvedTypeIter(t: PType, closure: RootRef): bool =
+  if tfUnresolved in t.flags: return true
+  case t.kind
+  of tyStatic:
+    return t.n == nil
+  of tyTypeDesc:
+    if t.base.kind == tyNone: return true
+    if containsUnresolvedTypeIter(t.base, closure): return true
+    return false
+  of tyGenericInvocation, tyGenericParam, tyFromExpr, tyAnything:
+    return true
+  else:
+    return false
+
+proc containsUnresolvedType*(t: PType): bool =
+  result = iterOverType(t, containsUnresolvedTypeIter, nil)
 
 proc baseOfDistinct*(t: PType; g: ModuleGraph; idgen: IdGenerator): PType =
   if t.kind == tyDistinct:

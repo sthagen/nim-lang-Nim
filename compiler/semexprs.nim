@@ -617,7 +617,7 @@ proc semIs(c: PContext, n: PNode, flags: TExprFlags): PNode =
       n[1] = makeTypeSymNode(c, lhsType, n[1].info)
       lhsType = n[1].typ
   else:
-    if c.inGenericContext > 0 and lhsType.base.containsGenericType:
+    if c.inGenericContext > 0 and lhsType.base.containsUnresolvedType:
       # BUGFIX: don't evaluate this too early: ``T is void``
       return
 
@@ -813,7 +813,7 @@ proc isUnresolvedSym(s: PSym): bool =
   result = s.kind == skGenericParam
   if not result and s.typ != nil:
     result = tfInferrableStatic in s.typ.flags or
-        (s.kind == skParam and s.typ.isMetaType) or
+        (s.kind == skParam and (s.typ.isMetaType or sfTemplateParam in s.flags)) or
         (s.kind == skType and
         s.typ.flags * {tfGenericTypeParam, tfImplicitTypeParam} != {})
 
@@ -1504,7 +1504,16 @@ proc tryReadingGenericParam(c: PContext, n: PNode, i: PIdent, t: PType): PNode =
       result.typ = makeTypeFromExpr(c, copyTree(result))
     else:
       result = nil
-  elif c.inGenericContext > 0 and t.containsGenericType:
+  of tyGenericBody, tyCompositeTypeClass:
+    if c.inGenericContext > 0:
+      result = readTypeParameter(c, t, i, n.info)
+      if result != nil:
+        # generic parameter exists, stop here but delay until instantiation
+        result = semGenericStmt(c, n)
+        result.typ = makeTypeFromExpr(c, copyTree(result))
+    else:
+      result = nil
+  elif c.inGenericContext > 0 and t.containsUnresolvedType:
     result = semGenericStmt(c, n)
     result.typ = makeTypeFromExpr(c, copyTree(result))
   else:
