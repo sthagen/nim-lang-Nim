@@ -1899,8 +1899,11 @@ proc typeRel(c: var TCandidate, f, aOrig: PType,
         else:
           result = isNone
   of tyConcept:
-    result = if concepts.conceptMatch(c.c, f, a, c.bindings, nil): isGeneric
-             else: isNone
+    if a.kind == tyConcept and sameType(f, a):
+      result = isGeneric
+    else:
+      result = if concepts.conceptMatch(c.c, f, a, c.bindings, nil): isGeneric
+               else: isNone
   of tyCompositeTypeClass:
     considerPreviousT:
       let roota = a.skipGenericAlias
@@ -2296,7 +2299,9 @@ proc userConvMatch(c: PContext, m: var TCandidate, f, a: PType,
       dest = generateTypeInstance(c, m.bindings, arg, dest)
     let fdest = typeRel(m, f, dest)
     if fdest in {isEqual, isGeneric} and not (dest.kind == tyLent and f.kind in {tyVar}):
-      markUsed(c, arg.info, c.converters[i])
+      # can't fully mark used yet, may not be used in final call
+      incl(c.converters[i].flags, sfUsed)
+      markOwnerModuleAsUsed(c, c.converters[i])
       var s = newSymNode(c.converters[i])
       s.typ = c.converters[i].typ
       s.info = arg.info
