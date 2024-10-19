@@ -1626,7 +1626,7 @@ proc genSeqConstr(p: BProc, n: PNode, d: var TLoc) =
 proc genArrToSeq(p: BProc, n: PNode, d: var TLoc) =
   var elem, arr: TLoc
   if n[1].kind == nkBracket:
-    n[1].typ = n.typ
+    n[1].typ() = n.typ
     genSeqConstr(p, n[1], d)
     return
   if d.k == locNone:
@@ -3077,7 +3077,7 @@ proc expr(p: BProc, n: PNode, d: var TLoc) =
       # addr ( deref ( x )) --> x
       var x = n[0][0]
       if n.typ.skipTypes(abstractVar).kind != tyOpenArray:
-        x.typ = n.typ
+        x.typ() = n.typ
       expr(p, x, d)
       return
     genAddr(p, n, d)
@@ -3524,16 +3524,15 @@ proc genBracedInit(p: BProc, n: PNode; isConst: bool; optionalType: PType; resul
       if n.kind != nkBracket:
         internalError(p.config, n.info, "const openArray expression is not an array construction")
 
-      var data = newRopeAppender()
-      genConstSimpleList(p, n, isConst, data)
-
       let payload = getTempName(p.module)
       let ctype = getTypeDesc(p.module, typ.elementType)
       let arrLen = n.len
-      appcg(p.module, cfsStrData,
-        "static $5 $1 $3[$2] = $4;$n", [
-        ctype, arrLen, payload, data,
-        if isConst: "const" else: ""])
+      var data = newBuilder("")
+      data.addArrayVarWithInitializer(
+          kind = if isConst: AlwaysConst else: Global,
+          name = payload, elementType = ctype, len = arrLen):
+        genConstSimpleList(p, n, isConst, data)
+      p.module.s[cfsStrData].add(data)
       var openArrInit: StructInitializer
       result.addStructInitializer(openArrInit, kind = siOrderedStruct):
         result.addField(openArrInit, name = "Field0"):
