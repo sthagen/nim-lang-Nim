@@ -1265,7 +1265,7 @@ proc genProcHeader(m: BModule; prc: PSym; result: var Rope; asPtr: bool = false)
 
 proc genTypeInfoV1(m: BModule; t: PType; info: TLineInfo): Rope
 proc getNimNode(m: BModule): Rope =
-  result = subscript(m.typeNodesName, rope(m.typeNodes))
+  result = subscript(m.typeNodesName, cIntValue(m.typeNodes))
   inc(m.typeNodes)
 
 proc tiNameForHcr(m: BModule; name: Rope): Rope =
@@ -1324,11 +1324,11 @@ proc genTypeInfoAux(m: BModule; typ, origType: PType, name: Rope;
     var x = typ.last
     if typ.kind == tyObject: x = x.skipTypes(skipPtrs)
     if typ.kind == tyPtr and x.kind == tyObject and incompleteType(x):
-      base = rope("0")
+      base = cIntValue(0)
     else:
       base = genTypeInfoV1(m, x, info)
   else:
-    base = rope("0")
+    base = cIntValue(0)
   genTypeInfoAuxBase(m, typ, origType, name, base, info)
 
 proc discriminatorTableName(m: BModule; objtype: PType, d: PSym): Rope =
@@ -1366,20 +1366,20 @@ proc genObjectFields(m: BModule; typ, origType: PType, n: PNode, expr: Rope;
       genTNimNodeArray(m, tmp, rope(n.len))
       for i in 0..<n.len:
         var tmp2 = getNimNode(m)
-        m.s[cfsTypeInit3].addSubscriptAssignment(tmp, rope(i)):
+        m.s[cfsTypeInit3].addSubscriptAssignment(tmp, cIntValue(i)):
           m.s[cfsTypeInit3].add(cAddr(tmp2))
         genObjectFields(m, typ, origType, n[i], tmp2, info)
       m.s[cfsTypeInit3].addFieldAssignment(expr, "len"):
-        m.s[cfsTypeInit3].add(rope(n.len))
+        m.s[cfsTypeInit3].addIntValue(n.len)
       m.s[cfsTypeInit3].addFieldAssignment(expr, "kind"):
-        m.s[cfsTypeInit3].add("2")
+        m.s[cfsTypeInit3].addIntValue(2)
       m.s[cfsTypeInit3].addFieldAssignment(expr, "sons"):
-        m.s[cfsTypeInit3].add(cAddr(subscript(tmp, "0")))
+        m.s[cfsTypeInit3].add(cAddr(subscript(tmp, cIntValue(0))))
     else:
       m.s[cfsTypeInit3].addFieldAssignment(expr, "len"):
-        m.s[cfsTypeInit3].add(rope(n.len))
+        m.s[cfsTypeInit3].addIntValue(n.len)
       m.s[cfsTypeInit3].addFieldAssignment(expr, "kind"):
-        m.s[cfsTypeInit3].add("2")
+        m.s[cfsTypeInit3].addIntValue(2)
   of nkRecCase:
     assert(n[0].kind == nkSym)
     var field = n[0].sym
@@ -1410,14 +1410,14 @@ proc genObjectFields(m: BModule; typ, origType: PType, n: PNode, expr: Rope;
             var x = toInt(getOrdValue(b[j][0]))
             var y = toInt(getOrdValue(b[j][1]))
             while x <= y:
-              m.s[cfsTypeInit3].addSubscriptAssignment(tmp, rope(x)):
+              m.s[cfsTypeInit3].addSubscriptAssignment(tmp, cIntValue(x)):
                 m.s[cfsTypeInit3].add(cAddr(tmp2))
               inc(x)
           else:
-            m.s[cfsTypeInit3].addSubscriptAssignment(tmp, rope(getOrdValue(b[j]))):
+            m.s[cfsTypeInit3].addSubscriptAssignment(tmp, cIntValue(getOrdValue(b[j]))):
               m.s[cfsTypeInit3].add(cAddr(tmp2))
       of nkElse:
-        m.s[cfsTypeInit3].addSubscriptAssignment(tmp, rope(L)):
+        m.s[cfsTypeInit3].addSubscriptAssignment(tmp, cIntValue(L)):
           m.s[cfsTypeInit3].add(cAddr(tmp2))
       else: internalError(m.config, n.info, "genObjectFields(nkRecCase)")
   of nkSym:
@@ -1452,14 +1452,14 @@ proc genObjectInfo(m: BModule; typ, origType: PType, name: Rope; info: TLineInfo
     t = t.baseClass
 
 proc genTupleInfo(m: BModule; typ, origType: PType, name: Rope; info: TLineInfo) =
-  genTypeInfoAuxBase(m, typ, typ, name, rope("0"), info)
+  genTypeInfoAuxBase(m, typ, typ, name, cIntValue(0), info)
   var expr = getNimNode(m)
   if not typ.isEmptyTupleType:
     var tmp = getTempName(m) & "_" & $typ.kidsLen
     genTNimNodeArray(m, tmp, rope(typ.kidsLen))
     for i, a in typ.ikids:
       var tmp2 = getNimNode(m)
-      m.s[cfsTypeInit3].addSubscriptAssignment(tmp, rope(i)):
+      m.s[cfsTypeInit3].addSubscriptAssignment(tmp, cIntValue(i)):
         m.s[cfsTypeInit3].add(cAddr(tmp2))
       m.s[cfsTypeInit3].addf("$1.kind = 1;$n" &
           "$1.offset = offsetof($2, Field$3);$n" &
@@ -1467,16 +1467,16 @@ proc genTupleInfo(m: BModule; typ, origType: PType, name: Rope; info: TLineInfo)
           "$1.name = \"Field$3\";$n",
            [tmp2, getTypeDesc(m, origType, dkVar), rope(i), genTypeInfoV1(m, a, info)])
     m.s[cfsTypeInit3].addFieldAssignment(expr, "len"):
-      m.s[cfsTypeInit3].add(rope(typ.kidsLen))
+      m.s[cfsTypeInit3].addIntValue(typ.kidsLen)
     m.s[cfsTypeInit3].addFieldAssignment(expr, "kind"):
-      m.s[cfsTypeInit3].add("2")
+      m.s[cfsTypeInit3].addIntValue(2)
     m.s[cfsTypeInit3].addFieldAssignment(expr, "sons"):
-      m.s[cfsTypeInit3].add(cAddr(subscript(tmp, "0")))
+      m.s[cfsTypeInit3].add(cAddr(subscript(tmp, cIntValue(0))))
   else:
     m.s[cfsTypeInit3].addFieldAssignment(expr, "len"):
-      m.s[cfsTypeInit3].add(rope(typ.kidsLen))
+      m.s[cfsTypeInit3].addIntValue(typ.kidsLen)
     m.s[cfsTypeInit3].addFieldAssignment(expr, "kind"):
-      m.s[cfsTypeInit3].add("2")
+      m.s[cfsTypeInit3].addIntValue(2)
   m.s[cfsTypeInit3].addFieldAssignment(tiNameForHcr(m, name), "node"):
     m.s[cfsTypeInit3].add(cAddr(expr))
 
@@ -1506,7 +1506,7 @@ proc genEnumInfo(m: BModule; typ: PType, name: Rope; info: TLineInfo) =
           enumNames.add(makeCString(field.ast.strVal))
       if field.position != i or tfEnumHasHoles in typ.flags:
         specialCases.addFieldAssignment(elemNode, "offset"):
-          specialCases.add(rope(field.position))
+          specialCases.addIntValue(field.position)
         hasHoles = true
   var enumArray = getTempName(m)
   var counter = getTempName(m)
@@ -1524,11 +1524,11 @@ proc genEnumInfo(m: BModule; typ: PType, name: Rope; info: TLineInfo) =
   m.s[cfsTypeInit3].add(specialCases)
   let n = getNimNode(m)
   m.s[cfsTypeInit3].addFieldAssignment(n, "len"):
-    m.s[cfsTypeInit3].add(rope(typ.n.len))
+    m.s[cfsTypeInit3].addIntValue(typ.n.len)
   m.s[cfsTypeInit3].addFieldAssignment(n, "kind"):
-    m.s[cfsTypeInit3].add("2")
+    m.s[cfsTypeInit3].addIntValue(0)
   m.s[cfsTypeInit3].addFieldAssignment(n, "sons"):
-    m.s[cfsTypeInit3].add(cAddr(subscript(nodePtrs, "0")))
+    m.s[cfsTypeInit3].add(cAddr(subscript(nodePtrs, cIntValue(0))))
   m.s[cfsTypeInit3].addFieldAssignment(tiNameForHcr(m, name), "node"):
     m.s[cfsTypeInit3].add(cAddr(n))
   if hasHoles:
@@ -1540,9 +1540,9 @@ proc genSetInfo(m: BModule; typ: PType, name: Rope; info: TLineInfo) =
   genTypeInfoAux(m, typ, typ, name, info)
   var tmp = getNimNode(m)
   m.s[cfsTypeInit3].addFieldAssignment(tmp, "len"):
-    m.s[cfsTypeInit3].add(rope(firstOrd(m.config, typ)))
+    m.s[cfsTypeInit3].addIntValue(firstOrd(m.config, typ))
   m.s[cfsTypeInit3].addFieldAssignment(tmp, "kind"):
-    m.s[cfsTypeInit3].add("0")
+    m.s[cfsTypeInit3].addIntValue(0)
   m.s[cfsTypeInit3].addFieldAssignment(tiNameForHcr(m, name), "node"):
     m.s[cfsTypeInit3].add(cAddr(tmp))
 
@@ -1746,7 +1746,7 @@ proc genTypeInfoV2OldImpl(m: BModule; t, origType: PType, name: Rope; info: TLin
         len = objDepth + 1,
         initializer = objDisplay)
     typeEntry.addFieldAssignment(name, "display"):
-      typeEntry.add(rope(objDisplayStore))
+      typeEntry.add(objDisplayStore)
 
   let dispatchMethods = toSeq(getMethodsPerType(m.g.graph, t))
   if dispatchMethods.len > 0:
@@ -1940,9 +1940,9 @@ proc genTypeInfoV1(m: BModule; t: PType; info: TLineInfo): Rope =
   rememberEmittedTypeInfo(m.g.graph, FileIndex(owner), $result)
 
   case t.kind
-  of tyEmpty, tyVoid: result = rope"0"
+  of tyEmpty, tyVoid: result = cIntValue(0)
   of tyPointer, tyBool, tyChar, tyCstring, tyString, tyInt..tyUInt64, tyVar, tyLent:
-    genTypeInfoAuxBase(m, t, t, result, rope"0", info)
+    genTypeInfoAuxBase(m, t, t, result, cIntValue(0), info)
   of tyStatic:
     if t.n != nil: result = genTypeInfoV1(m, skipModifier t, info)
     else: internalError(m.config, "genTypeInfoV1(" & $t.kind & ')')
@@ -1951,7 +1951,7 @@ proc genTypeInfoV1(m: BModule; t: PType; info: TLineInfo): Rope =
     return genTypeInfoV1(m, t.skipModifier, info)
   of tyProc:
     if t.callConv != ccClosure:
-      genTypeInfoAuxBase(m, t, t, result, rope"0", info)
+      genTypeInfoAuxBase(m, t, t, result, cIntValue(0), info)
     else:
       let x = fakeClosureType(m, t.owner)
       genTupleInfo(m, x, x, result, info)

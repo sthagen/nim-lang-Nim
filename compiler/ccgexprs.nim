@@ -2042,7 +2042,7 @@ proc genInOp(p: BProc, e: PNode, d: var TLoc) =
       b.snippet.add(")")
     else:
       # handle the case of an empty set
-      b.snippet = rope("0")
+      b.snippet = cIntValue(0)
     putIntoDest(p, d, e, b.snippet)
   else:
     assert(e[1].typ != nil)
@@ -2696,7 +2696,7 @@ proc genSetConstr(p: BProc, e: PNode, d: var TLoc) =
       # small set
       var ts = "NU" & $(getSize(p.config, e.typ) * 8)
       p.s(cpsStmts).addAssignment(rdLoc(d)):
-        p.s(cpsStmts).add("0")
+        p.s(cpsStmts).addIntValue(0)
       for it in e.sons:
         if it.kind == nkRange:
           idx = getTemp(p, getSysType(p.module.g.graph, unknownLineInfo, tyInt)) # our counter
@@ -3260,8 +3260,8 @@ proc getDefaultValue(p: BProc; typ: PType; info: TLineInfo; result: var Builder)
   var t = skipTypes(typ, abstractRange+{tyOwned}-{tyTypeDesc})
   case t.kind
   of tyBool: result.add rope"NIM_FALSE"
-  of tyEnum, tyChar, tyInt..tyInt64, tyUInt..tyUInt64: result.add rope"0"
-  of tyFloat..tyFloat128: result.add rope"0.0"
+  of tyEnum, tyChar, tyInt..tyInt64, tyUInt..tyUInt64: result.addIntValue(0)
+  of tyFloat..tyFloat128: result.addFloatValue(0.0)
   of tyCstring, tyVar, tyLent, tyPointer, tyPtr, tyUntyped,
      tyTyped, tyTypeDesc, tyStatic, tyRef, tyNil:
     result.add rope"NIM_NIL"
@@ -3270,7 +3270,7 @@ proc getDefaultValue(p: BProc; typ: PType; info: TLineInfo; result: var Builder)
       var seqInit: StructInitializer
       result.addStructInitializer(seqInit, kind = siOrderedStruct):
         result.addField(seqInit, name = "len"):
-          result.add("0")
+          result.addIntValue(0)
         result.addField(seqInit, name = "p"):
           result.add("NIM_NIL")
     else:
@@ -3294,7 +3294,7 @@ proc getDefaultValue(p: BProc; typ: PType; info: TLineInfo; result: var Builder)
     result.addStructInitializer(tupleInit, kind = siOrderedStruct):
       if p.vccAndC and t.isEmptyTupleType:
         result.addField(tupleInit, name = "dummy"):
-          result.add "0"
+          result.addIntValue(0)
       for i, a in t.ikids:
         result.addField(tupleInit, name = "Field" & $i):
           getDefaultValue(p, a, info, result)
@@ -3311,13 +3311,13 @@ proc getDefaultValue(p: BProc; typ: PType; info: TLineInfo; result: var Builder)
       result.addField(openArrInit, name = "Field0"):
         result.add("NIM_NIL")
       result.addField(openArrInit, name = "Field1"):
-        result.add("0")
+        result.addIntValue(0)
   of tySet:
     if mapSetType(p.config, t) == ctArray:
       var setInit: StructInitializer
       result.addStructInitializer(setInit, kind = siArray):
         discard
-    else: result.add "0"
+    else: result.addIntValue(0)
   else:
     globalError(p.config, info, "cannot create null element for: " & $t.kind)
 
@@ -3459,7 +3459,7 @@ proc genConstTuple(p: BProc, n: PNode; isConst: bool; tup: PType; result: var Bu
   result.addStructInitializer(tupleInit, kind = siOrderedStruct):
     if p.vccAndC and n.len == 0:
       result.addField(tupleInit, name = "dummy"):
-        result.add("0")
+        result.addIntValue(0)
     for i in 0..<n.len:
       var it = n[i]
       if it.kind == nkExprColonExpr:
@@ -3527,7 +3527,7 @@ proc genConstSeqV2(p: BProc, n: PNode, t: PType; isConst: bool; result: var Buil
   var resultInit: StructInitializer
   result.addStructInitializer(resultInit, kind = siOrderedStruct):
     result.addField(resultInit, name = "len"):
-      result.add(rope(n.len))
+      result.addIntValue(n.len)
     result.addField(resultInit, name = "p"):
       result.add cCast(typ = ptrType(getSeqPayloadType(p.module, t)), value = cAddr(payload))
 
@@ -3601,7 +3601,7 @@ proc genBracedInit(p: BProc, n: PNode; isConst: bool; optionalType: PType; resul
         result.addField(openArrInit, name = "Field0"):
           result.add(cCast(typ = ptrType(ctype), value = cAddr(payload)))
         result.addField(openArrInit, name = "Field1"):
-          result.add(rope arrLen)
+          result.addIntValue(arrLen)
 
     of tyObject:
       genConstObjConstr(p, n, isConst, result)
