@@ -651,53 +651,119 @@ proc binaryArith(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   s = max(getSize(p.config, a.t), getSize(p.config, b.t)) * 8
   k = getSize(p.config, a.t) * 8
 
-  template applyFormat(frmt: untyped) =
-    putIntoDest(p, d, e, frmt % [
-      rdLoc(a), rdLoc(b), rope(s),
-      getSimpleTypeDesc(p.module, e.typ), rope(k)]
-    )
+  var res = ""
+  template getType(): untyped =
+    getSimpleTypeDesc(p.module, e.typ)
+  let ra = rdLoc(a)
+  let rb = rdLoc(b)
 
   case op
-  of mAddF64: applyFormat("(($4)($1) + ($4)($2))")
-  of mSubF64: applyFormat("(($4)($1) - ($4)($2))")
-  of mMulF64: applyFormat("(($4)($1) * ($4)($2))")
-  of mDivF64: applyFormat("(($4)($1) / ($4)($2))")
-  of mShrI: applyFormat("($4)((NU$5)($1) >> (NU$3)($2))")
-  of mShlI: applyFormat("($4)((NU$3)($1) << (NU$3)($2))")
-  of mAshrI: applyFormat("($4)((NI$3)($1) >> (NU$3)($2))")
-  of mBitandI: applyFormat("($4)($1 & $2)")
-  of mBitorI: applyFormat("($4)($1 | $2)")
-  of mBitxorI: applyFormat("($4)($1 ^ $2)")
-  of mMinI: applyFormat("(($1 <= $2) ? $1 : $2)")
-  of mMaxI: applyFormat("(($1 >= $2) ? $1 : $2)")
-  of mAddU: applyFormat("($4)((NU$3)($1) + (NU$3)($2))")
-  of mSubU: applyFormat("($4)((NU$3)($1) - (NU$3)($2))")
-  of mMulU: applyFormat("($4)((NU$3)($1) * (NU$3)($2))")
-  of mDivU: applyFormat("($4)((NU$3)($1) / (NU$3)($2))")
-  of mModU: applyFormat("($4)((NU$3)($1) % (NU$3)($2))")
-  of mEqI: applyFormat("($1 == $2)")
-  of mLeI: applyFormat("($1 <= $2)")
-  of mLtI: applyFormat("($1 < $2)")
-  of mEqF64: applyFormat("($1 == $2)")
-  of mLeF64: applyFormat("($1 <= $2)")
-  of mLtF64: applyFormat("($1 < $2)")
-  of mLeU: applyFormat("((NU$3)($1) <= (NU$3)($2))")
-  of mLtU: applyFormat("((NU$3)($1) < (NU$3)($2))")
-  of mEqEnum: applyFormat("($1 == $2)")
-  of mLeEnum: applyFormat("($1 <= $2)")
-  of mLtEnum: applyFormat("($1 < $2)")
-  of mEqCh: applyFormat("((NU8)($1) == (NU8)($2))")
-  of mLeCh: applyFormat("((NU8)($1) <= (NU8)($2))")
-  of mLtCh: applyFormat("((NU8)($1) < (NU8)($2))")
-  of mEqB: applyFormat("($1 == $2)")
-  of mLeB: applyFormat("($1 <= $2)")
-  of mLtB: applyFormat("($1 < $2)")
-  of mEqRef: applyFormat("($1 == $2)")
-  of mLePtr: applyFormat("($1 <= $2)")
-  of mLtPtr: applyFormat("($1 < $2)")
-  of mXor: applyFormat("($1 != $2)")
+  of mAddF64:
+    let t = getType()
+    res = cOp(Add, t, cCast(t, ra), cCast(t, rb))
+  of mSubF64:
+    let t = getType()
+    res = cOp(Sub, t, cCast(t, ra), cCast(t, rb))
+  of mMulF64:
+    let t = getType()
+    res = cOp(Mul, t, cCast(t, ra), cCast(t, rb))
+  of mDivF64:
+    let t = getType()
+    res = cOp(Div, t, cCast(t, ra), cCast(t, rb))
+  of mShrI:
+    let t = getType()
+    let at = "NU" & $k
+    let bt = "NU" & $s
+    res = cCast(t, cOp(Shr, at, cCast(at, ra), cCast(bt, rb)))
+  of mShlI:
+    let t = getType()
+    let at = "NU" & $s
+    res = cCast(t, cOp(Shl, at, cCast(at, ra), cCast(at, rb)))
+  of mAshrI:
+    let t = getType()
+    let at = "NI" & $s
+    let bt = "NU" & $s
+    res = cCast(t, cOp(Shr, at, cCast(at, ra), cCast(bt, rb)))
+  of mBitandI:
+    let t = getType()
+    res = cCast(t, cOp(BitAnd, t, ra, rb))
+  of mBitorI:
+    let t = getType()
+    res = cCast(t, cOp(BitOr, t, ra, rb))
+  of mBitxorI:
+    let t = getType()
+    res = cCast(t, cOp(BitXor, t, ra, rb))
+  of mMinI:
+    res = cIfExpr(cOp(LessEqual, ra, rb), ra, rb)
+  of mMaxI:
+    res = cIfExpr(cOp(GreaterEqual, ra, rb), ra, rb)
+  of mAddU:
+    let t = getType()
+    let ot = "NU" & $s
+    res = cCast(t, cOp(Add, ot, cCast(ot, ra), cCast(ot, rb)))
+  of mSubU:
+    let t = getType()
+    let ot = "NU" & $s
+    res = cCast(t, cOp(Sub, ot, cCast(ot, ra), cCast(ot, rb)))
+  of mMulU:
+    let t = getType()
+    let ot = "NU" & $s
+    res = cCast(t, cOp(Mul, ot, cCast(ot, ra), cCast(ot, rb)))
+  of mDivU:
+    let t = getType()
+    let ot = "NU" & $s
+    res = cCast(t, cOp(Div, ot, cCast(ot, ra), cCast(ot, rb)))
+  of mModU:
+    let t = getType()
+    let ot = "NU" & $s
+    res = cCast(t, cOp(Mod, ot, cCast(ot, ra), cCast(ot, rb)))
+  of mEqI:
+    res = cOp(Equal, ra, rb)
+  of mLeI:
+    res = cOp(LessEqual, ra, rb)
+  of mLtI:
+    res = cOp(LessThan, ra, rb)
+  of mEqF64:
+    res = cOp(Equal, ra, rb)
+  of mLeF64:
+    res = cOp(LessEqual, ra, rb)
+  of mLtF64:
+    res = cOp(LessThan, ra, rb)
+  of mLeU:
+    let ot = "NU" & $s
+    res = cOp(LessEqual, cCast(ot, ra), cCast(ot, rb))
+  of mLtU:
+    let ot = "NU" & $s
+    res = cOp(LessThan, cCast(ot, ra), cCast(ot, rb))
+  of mEqEnum:
+    res = cOp(Equal, ra, rb)
+  of mLeEnum:
+    res = cOp(LessEqual, ra, rb)
+  of mLtEnum:
+    res = cOp(LessThan, ra, rb)
+  of mEqCh:
+    res = cOp(Equal, cCast("NU8", ra), cCast("NU8", rb))
+  of mLeCh:
+    res = cOp(LessEqual, cCast("NU8", ra), cCast("NU8", rb))
+  of mLtCh:
+    res = cOp(LessThan, cCast("NU8", ra), cCast("NU8", rb))
+  of mEqB:
+    res = cOp(Equal, ra, rb)
+  of mLeB:
+    res = cOp(LessEqual, ra, rb)
+  of mLtB:
+    res = cOp(LessThan, ra, rb)
+  of mEqRef:
+    res = cOp(Equal, ra, rb)
+  of mLePtr:
+    res = cOp(LessEqual, ra, rb)
+  of mLtPtr:
+    res = cOp(LessThan, ra, rb)
+  of mXor:
+    res = cOp(NotEqual, ra, rb)
   else:
     assert(false, $op)
+  putIntoDest(p, d, e, res)
 
 proc genEqProc(p: BProc, e: PNode, d: var TLoc) =
   assert(e[1].typ != nil)
@@ -724,22 +790,25 @@ proc unaryArith(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   var a = initLocExpr(p, e[1])
   t = skipTypes(e.typ, abstractRange)
 
-  template applyFormat(frmt: untyped) =
-    putIntoDest(p, d, e, frmt % [rdLoc(a), rope(getSize(p.config, t) * 8),
-                getSimpleTypeDesc(p.module, e.typ)])
+  var res = ""
+  let ra = rdLoc(a)
+
   case op
   of mNot:
-    applyFormat("!($1)")
+    res = cOp(Not, ra)
   of mUnaryPlusI:
-    applyFormat("$1")
+    res = ra
   of mBitnotI:
-    applyFormat("($3)((NU$2) ~($1))")
+    let at = "NU" & $(getSize(p.config, t) * 8)
+    let t = getSimpleTypeDesc(p.module, e.typ)
+    res = cCast(t, cCast(at, cOp(BitNot, t, ra)))
   of mUnaryPlusF64:
-    applyFormat("$1")
+    res = ra
   of mUnaryMinusF64:
-    applyFormat("-($1)")
+    res = cOp(Neg, getSimpleTypeDesc(p.module, e.typ), ra)
   else:
     assert false, $op
+  putIntoDest(p, d, e, res)
 
 proc isCppRef(p: BProc; typ: PType): bool {.inline.} =
   result = p.module.compileToCpp and
@@ -2962,13 +3031,22 @@ proc genConstHeader(m, q: BModule; p: BProc, sym: PSym) =
     if not genConstSetup(p, sym): return
   assert(sym.loc.snippet != "", $sym.name.s & $sym.itemId)
   if m.hcrOn:
-    m.s[cfsVars].addf("static $1* $2;$n", [getTypeDesc(m, sym.loc.t, dkVar), sym.loc.snippet]);
-    m.initProc.procSec(cpsLocals).addf(
-      "\t$1 = ($2*)hcrGetGlobal($3, \"$1\");$n", [sym.loc.snippet,
-      getTypeDesc(m, sym.loc.t, dkVar), getModuleDllPath(q, sym)])
+    m.s[cfsVars].addVar(kind = Global, name = sym.loc.snippet,
+      typ = ptrType(getTypeDesc(m, sym.loc.t, dkVar)))
+    m.initProc.procSec(cpsLocals).add('\t')
+    m.initProc.procSec(cpsLocals).addAssignment(sym.loc.snippet):
+      m.initProc.procSec(cpsLocals).addCast(ptrType(getTypeDesc(m, sym.loc.t, dkVar))):
+        var getGlobalCall: CallBuilder
+        m.initProc.procSec(cpsLocals).addCall(getGlobalCall, "hcrGetGlobal"):
+          m.initProc.procSec(cpsLocals).addArgument(getGlobalCall):
+            m.initProc.procSec(cpsLocals).add(getModuleDllPath(q, sym))
+          m.initProc.procSec(cpsLocals).addArgument(getGlobalCall):
+            m.initProc.procSec(cpsLocals).add('"' & sym.loc.snippet & '"')
   else:
-    let headerDecl = "extern NIM_CONST $1 $2;$n" %
-        [getTypeDesc(m, sym.loc.t, dkVar), sym.loc.snippet]
+    var headerDecl = newBuilder("")
+    headerDecl.addDeclWithVisibility(Extern):
+      headerDecl.addVar(kind = Local, name = sym.loc.snippet,
+        typ = constType(getTypeDesc(m, sym.loc.t, dkVar)))
     m.s[cfsData].add(headerDecl)
     if sfExportc in sym.flags and p.module.g.generatedHeader != nil:
       p.module.g.generatedHeader.s[cfsData].add(headerDecl)
@@ -2977,23 +3055,44 @@ proc genConstDefinition(q: BModule; p: BProc; sym: PSym) =
   # add a suffix for hcr - will later init the global pointer with this data
   let actualConstName = if q.hcrOn: sym.loc.snippet & "_const" else: sym.loc.snippet
   var data = newRopeAppender()
-  data.addf("N_LIB_PRIVATE NIM_CONST $1 $2 = ",
-           [getTypeDesc(q, sym.typ), actualConstName])
-  genBracedInit(q.initProc, sym.astdef, isConst = true, sym.typ, data)
-  data.addf(";$n", [])
+  data.addDeclWithVisibility(Private):
+    data.addVarWithTypeAndInitializer(Local, actualConstName):
+      data.add(constType(getTypeDesc(q, sym.typ)))
+    do:
+      genBracedInit(q.initProc, sym.astdef, isConst = true, sym.typ, data)
   q.s[cfsData].add data
   if q.hcrOn:
     # generate the global pointer with the real name
-    q.s[cfsVars].addf("static $1* $2;$n", [getTypeDesc(q, sym.loc.t, dkVar), sym.loc.snippet])
+    q.s[cfsVars].addVar(kind = Global, name = sym.loc.snippet,
+      typ = ptrType(getTypeDesc(q, sym.loc.t, dkVar)))
     # register it (but ignore the boolean result of hcrRegisterGlobal)
-    q.initProc.procSec(cpsLocals).addf(
-      "\thcrRegisterGlobal($1, \"$2\", sizeof($3), NULL, (void**)&$2);$n",
-      [getModuleDllPath(q, sym), sym.loc.snippet, rdLoc(sym.loc)])
+    q.initProc.procSec(cpsLocals).add('\t')
+    q.initProc.procSec(cpsLocals).addStmt():
+      var registerCall: CallBuilder
+      q.initProc.procSec(cpsLocals).addCall(registerCall, "hcrRegisterGlobal"):
+        q.initProc.procSec(cpsLocals).addArgument(registerCall):
+          q.initProc.procSec(cpsLocals).add(getModuleDllPath(q, sym))
+        q.initProc.procSec(cpsLocals).addArgument(registerCall):
+          q.initProc.procSec(cpsLocals).add('"' & sym.loc.snippet & '"')
+        q.initProc.procSec(cpsLocals).addArgument(registerCall):
+          q.initProc.procSec(cpsLocals).addSizeof(rdLoc(sym.loc))
+        q.initProc.procSec(cpsLocals).addArgument(registerCall):
+          q.initProc.procSec(cpsLocals).add("NULL")
+        q.initProc.procSec(cpsLocals).addArgument(registerCall):
+          q.initProc.procSec(cpsLocals).addCast("void**"):
+            q.initProc.procSec(cpsLocals).add(cAddr(sym.loc.snippet))
     # always copy over the contents of the actual constant with the _const
     # suffix ==> this means that the constant is reloadable & updatable!
-    q.initProc.procSec(cpsLocals).add(ropecg(q,
-      "\t#nimCopyMem((void*)$1, (NIM_CONST void*)&$2, sizeof($3));$n",
-      [sym.loc.snippet, actualConstName, rdLoc(sym.loc)]))
+    q.initProc.procSec(cpsLocals).add('\t')
+    q.initProc.procSec(cpsLocals).addStmt():
+      var copyCall: CallBuilder
+      q.initProc.procSec(cpsLocals).addCall(copyCall, cgsymValue(q, "nimCopyMem")):
+        q.initProc.procSec(cpsLocals).addArgument(copyCall):
+          q.initProc.procSec(cpsLocals).add(cCast("void*", sym.loc.snippet))
+        q.initProc.procSec(cpsLocals).addArgument(copyCall):
+          q.initProc.procSec(cpsLocals).add(cCast(constType("void*"), cAddr(actualConstName)))
+        q.initProc.procSec(cpsLocals).addArgument(copyCall):
+          q.initProc.procSec(cpsLocals).addSizeof(rdLoc(sym.loc))
 
 proc genConstStmt(p: BProc, n: PNode) =
   # This code is only used in the new DCE implementation.
