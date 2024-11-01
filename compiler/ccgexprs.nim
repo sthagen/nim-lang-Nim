@@ -20,29 +20,6 @@ proc getNullValueAuxT(p: BProc; orig, t: PType; obj, constOrNil: PNode,
 
 proc rdSetElemLoc(conf: ConfigRef; a: TLoc, typ: PType; result: var Rope)
 
-proc int64Literal(i: BiggestInt; result: var Builder) =
-  if i > low(int64):
-    result.add "IL64($1)" % [rope(i)]
-  else:
-    result.add "(IL64(-9223372036854775807) - IL64(1))"
-
-proc uint64Literal(i: uint64; result: var Builder) =
-  result.add rope($i & "ULL")
-
-proc intLiteral(i: BiggestInt; result: var Builder) =
-  if i > low(int32) and i <= high(int32):
-    result.add rope(i)
-  elif i == low(int32):
-    # Nim has the same bug for the same reasons :-)
-    result.add "(-2147483647 -1)"
-  elif i > low(int64):
-    result.add "IL64($1)" % [rope(i)]
-  else:
-    result.add "(IL64(-9223372036854775807) - IL64(1))"
-
-proc intLiteral(i: Int128; result: var Builder) =
-  intLiteral(toInt64(i), result)
-
 proc genLiteral(p: BProc, n: PNode, ty: PType; result: var Builder) =
   case n.kind
   of nkCharLit..nkUInt64Lit:
@@ -196,15 +173,21 @@ proc canMove(p: BProc, n: PNode; dest: TLoc): bool =
   #  echo n.info, " optimized ", n
   #  result = false
 
+template simpleAsgn(builder: var Builder, dest, src: TLoc) =
+  let rd = rdLoc(dest)
+  let rs = rdLoc(src)
+  builder.addAssignment(rd, rs) 
+
 proc genRefAssign(p: BProc, dest, src: TLoc) =
   if (dest.storage == OnStack and p.config.selectedGC != gcGo) or not usesWriteBarrier(p.config):
-    linefmt(p, cpsStmts, "$1 = $2;$n", [rdLoc(dest), rdLoc(src)])
-  elif dest.storage == OnHeap:
-    linefmt(p, cpsStmts, "#asgnRef((void**) $1, $2);$n",
-            [addrLoc(p.config, dest), rdLoc(src)])
+    simpleAsgn(p.s(cpsStmts), dest, src)
   else:
-    linefmt(p, cpsStmts, "#unsureAsgnRef((void**) $1, $2);$n",
-            [addrLoc(p.config, dest), rdLoc(src)])
+    let fnName =
+      if dest.storage == OnHeap: cgsymValue(p.module, "asgnRef")
+      else: cgsymValue(p.module, "unsureAsgnRef")
+    let rad = addrLoc(p.config, dest)
+    let rs = rdLoc(src)
+    p.s(cpsStmts).addCallStmt(fnName, cCast("void**", rad), rs)
 
 proc asgnComplexity(n: PNode): int =
   if n != nil:
@@ -271,21 +254,31 @@ proc genGenericAsgn(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
   # here for this flag, where it is reasonably safe to do so
   # (for objects, etc.):
   if optSeqDestructors in p.config.globalOptions:
-    linefmt(p, cpsStmts,
-        "$1 = $2;$n",
-        [rdLoc(dest), rdLoc(src)])
+    simpleAsgn(p.s(cpsStmts), dest, src)
   elif needToCopy notin flags or
       tfShallow in skipTypes(dest.t, abstractVarRange).flags:
     if (dest.storage == OnStack and p.config.selectedGC != gcGo) or not usesWriteBarrier(p.config):
-      linefmt(p, cpsStmts,
-           "#nimCopyMem((void*)$1, (NIM_CONST void*)$2, sizeof($3));$n",
-           [addrLoc(p.config, dest), addrLoc(p.config, src), rdLoc(dest)])
+      let rad = addrLoc(p.config, dest)
+      let ras = addrLoc(p.config, src)
+      let rd = rdLoc(dest)
+      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimCopyMem"),
+        cCast("void*", rad),
+        cCast(ptrConstType("void"), ras),
+        cSizeof(rd))
     else:
-      linefmt(p, cpsStmts, "#genericShallowAssign((void*)$1, (void*)$2, $3);$n",
-              [addrLoc(p.config, dest), addrLoc(p.config, src), genTypeInfoV1(p.module, dest.t, dest.lode.info)])
+      let rad = addrLoc(p.config, dest)
+      let ras = addrLoc(p.config, src)
+      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericShallowAssign"),
+        cCast("void*", rad),
+        cCast("void*", ras),
+        genTypeInfoV1(p.module, dest.t, dest.lode.info))
   else:
-    linefmt(p, cpsStmts, "#genericAssign((void*)$1, (void*)$2, $3);$n",
-            [addrLoc(p.config, dest), addrLoc(p.config, src), genTypeInfoV1(p.module, dest.t, dest.lode.info)])
+    let rad = addrLoc(p.config, dest)
+    let ras = addrLoc(p.config, src)
+    p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericAssign"),
+      cCast("void*", rad),
+      cCast("void*", ras),
+      genTypeInfoV1(p.module, dest.t, dest.lode.info))
 
 proc genOpenArrayConv(p: BProc; d: TLoc; a: TLoc; flags: TAssignmentFlags) =
   assert d.k != locNone
@@ -296,29 +289,48 @@ proc genOpenArrayConv(p: BProc; d: TLoc; a: TLoc; flags: TAssignmentFlags) =
     if reifiedOpenArray(a.lode):
       if needTempForOpenArray in flags:
         var tmp: TLoc = getTemp(p, a.t)
-        linefmt(p, cpsStmts, "$2 = $1; $n",
-                [a.rdLoc, tmp.rdLoc])
-        linefmt(p, cpsStmts, "$1.Field0 = $2.Field0; $1.Field1 = $2.Field1;$n",
-          [rdLoc(d), tmp.rdLoc])
+        let rtmp = tmp.rdLoc
+        let ra = a.rdLoc
+        p.s(cpsStmts).addAssignment(rtmp, ra)
+        let rd = d.rdLoc
+        p.s(cpsStmts).addMutualFieldAssignment(rd, rtmp, "Field0")
+        p.s(cpsStmts).addMutualFieldAssignment(rd, rtmp, "Field1")
       else:
-        linefmt(p, cpsStmts, "$1.Field0 = $2.Field0; $1.Field1 = $2.Field1;$n",
-          [rdLoc(d), a.rdLoc])
+        let rd = d.rdLoc
+        let ra = a.rdLoc
+        p.s(cpsStmts).addMutualFieldAssignment(rd, ra, "Field0")
+        p.s(cpsStmts).addMutualFieldAssignment(rd, ra, "Field1")
     else:
-      linefmt(p, cpsStmts, "$1.Field0 = $2; $1.Field1 = $2Len_0;$n",
-        [rdLoc(d), a.rdLoc])
+      let rd = d.rdLoc
+      let ra = a.rdLoc
+      p.s(cpsStmts).addFieldAssignment(rd, "Field0", ra)
+      p.s(cpsStmts).addFieldAssignment(rd, "Field1", ra & "Len_0")
   of tySequence:
-    linefmt(p, cpsStmts, "$1.Field0 = ($5) ? ($2$3) : NIM_NIL; $1.Field1 = $4;$n",
-      [rdLoc(d), a.rdLoc, dataField(p), lenExpr(p, a), dataFieldAccessor(p, a.rdLoc)])
+    let rd = d.rdLoc
+    let ra = a.rdLoc
+    let la = lenExpr(p, a)
+    p.s(cpsStmts).addFieldAssignment(rd, "Field0",
+      cIfExpr(dataFieldAccessor(p, ra), dataField(p, ra), "NIM_NIL"))
+    p.s(cpsStmts).addFieldAssignment(rd, "Field1", la)
   of tyArray:
-    linefmt(p, cpsStmts, "$1.Field0 = $2; $1.Field1 = $3;$n",
-      [rdLoc(d), rdLoc(a), rope(lengthOrd(p.config, a.t))])
+    let rd = d.rdLoc
+    let ra = a.rdLoc
+    p.s(cpsStmts).addFieldAssignment(rd, "Field0", ra)
+    p.s(cpsStmts).addFieldAssignment(rd, "Field1", lengthOrd(p.config, a.t))
   of tyString:
     let etyp = skipTypes(a.t, abstractInst)
     if etyp.kind in {tyVar} and optSeqDestructors in p.config.globalOptions:
-      linefmt(p, cpsStmts, "#nimPrepareStrMutationV2($1);$n", [byRefLoc(p, a)])
+      let bra = byRefLoc(p, a)
+      p.s(cpsStmts).addCallStmt(
+        cgsymValue(p.module, "nimPrepareStrMutationV2"),
+        bra)
 
-    linefmt(p, cpsStmts, "$1.Field0 = ($5) ? ($2$3) : NIM_NIL; $1.Field1 = $4;$n",
-      [rdLoc(d), a.rdLoc, dataField(p), lenExpr(p, a), dataFieldAccessor(p, a.rdLoc)])
+    let rd = d.rdLoc
+    let ra = a.rdLoc
+    p.s(cpsStmts).addFieldAssignment(rd, "Field0",
+      cIfExpr(dataFieldAccessor(p, ra), dataField(p, ra), "NIM_NIL"))
+    let la = lenExpr(p, a)
+    p.s(cpsStmts).addFieldAssignment(rd, "Field1", la)
   else:
     internalError(p.config, a.lode.info, "cannot handle " & $a.t.kind)
 
@@ -327,7 +339,7 @@ proc genAssignment(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
   # the assignment operation in C.
   if src.t != nil and src.t.kind == tyPtr:
     # little HACK to support the new 'var T' as return type:
-    linefmt(p, cpsStmts, "$1 = $2;$n", [rdLoc(dest), rdLoc(src)])
+    simpleAsgn(p.s(cpsStmts), dest, src)
     return
   let ty = skipTypes(dest.t, abstractRange + tyUserTypeClasses + {tyStatic})
   case ty.kind
@@ -339,9 +351,12 @@ proc genAssignment(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
     elif (needToCopy notin flags and src.storage != OnStatic) or canMove(p, src.lode, dest):
       genRefAssign(p, dest, src)
     else:
-      linefmt(p, cpsStmts, "#genericSeqAssign($1, $2, $3);$n",
-              [addrLoc(p.config, dest), rdLoc(src),
-              genTypeInfoV1(p.module, dest.t, dest.lode.info)])
+      let rad = addrLoc(p.config, dest)
+      let rs = rdLoc(src)
+      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericSeqAssign"),
+        rad,
+        rs,
+        genTypeInfoV1(p.module, dest.t, dest.lode.info))
   of tyString:
     if optSeqDestructors in p.config.globalOptions:
       genGenericAsgn(p, dest, src, flags)
@@ -349,35 +364,48 @@ proc genAssignment(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
       genRefAssign(p, dest, src)
     else:
       if (dest.storage == OnStack and p.config.selectedGC != gcGo) or not usesWriteBarrier(p.config):
-        linefmt(p, cpsStmts, "$1 = #copyString($2);$n", [dest.rdLoc, src.rdLoc])
+        let rd = rdLoc(dest)
+        let rs = rdLoc(src)
+        p.s(cpsStmts).addAssignmentWithValue(rd):
+          p.s(cpsStmts).addCall(cgsymValue(p.module, "copyString"), rs)
       elif dest.storage == OnHeap:
+        let rd = rdLoc(dest)
+        let rs = rdLoc(src)
         # we use a temporary to care for the dreaded self assignment:
         var tmp: TLoc = getTemp(p, ty)
-        linefmt(p, cpsStmts, "$3 = $1; $1 = #copyStringRC1($2);$n",
-                [dest.rdLoc, src.rdLoc, tmp.rdLoc])
-        linefmt(p, cpsStmts, "if ($1) #nimGCunrefNoCycle($1);$n", [tmp.rdLoc])
+        let rtmp = rdLoc(tmp)
+        p.s(cpsStmts).addAssignment(rtmp, rd)
+        p.s(cpsStmts).addAssignmentWithValue(rd):
+          p.s(cpsStmts).addCall(cgsymValue(p.module, "copyStringRC1"), rs)
+        p.s(cpsStmts).addSingleIfStmt(rtmp):
+          p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimGCunrefNoCycle"), rtmp)
       else:
-        linefmt(p, cpsStmts, "#unsureAsgnRef((void**) $1, #copyString($2));$n",
-               [addrLoc(p.config, dest), rdLoc(src)])
+        let rad = addrLoc(p.config, dest)
+        let rs = rdLoc(src)
+        p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "unsureAsgnRef"),
+          cCast("void**", rad),
+          cCall(cgsymValue(p.module, "copyString"), rs))
   of tyProc:
     if containsGarbageCollectedRef(dest.t):
       # optimize closure assignment:
       let a = optAsgnLoc(dest, dest.t, "ClE_0".rope)
       let b = optAsgnLoc(src, dest.t, "ClE_0".rope)
       genRefAssign(p, a, b)
-      linefmt(p, cpsStmts, "$1.ClP_0 = $2.ClP_0;$n", [rdLoc(dest), rdLoc(src)])
+      let rd = rdLoc(dest)
+      let rs = rdLoc(src)
+      p.s(cpsStmts).addMutualFieldAssignment(rd, rs, "ClP_0")
     else:
-      linefmt(p, cpsStmts, "$1 = $2;$n", [rdLoc(dest), rdLoc(src)])
+      simpleAsgn(p.s(cpsStmts), dest, src)
   of tyTuple:
     if containsGarbageCollectedRef(dest.t):
       if dest.t.kidsLen <= 4: genOptAsgnTuple(p, dest, src, flags)
       else: genGenericAsgn(p, dest, src, flags)
     else:
-      linefmt(p, cpsStmts, "$1 = $2;$n", [rdLoc(dest), rdLoc(src)])
+      simpleAsgn(p.s(cpsStmts), dest, src)
   of tyObject:
     # XXX: check for subtyping?
     if ty.isImportedCppType:
-      linefmt(p, cpsStmts, "$1 = $2;$n", [rdLoc(dest), rdLoc(src)])
+      simpleAsgn(p.s(cpsStmts), dest, src)
     elif not isObjLackingTypeField(ty):
       genGenericAsgn(p, dest, src, flags)
     elif containsGarbageCollectedRef(ty):
@@ -389,48 +417,60 @@ proc genAssignment(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
       else:
         genGenericAsgn(p, dest, src, flags)
     else:
-      linefmt(p, cpsStmts, "$1 = $2;$n", [rdLoc(dest), rdLoc(src)])
+      simpleAsgn(p.s(cpsStmts), dest, src)
   of tyArray:
     if containsGarbageCollectedRef(dest.t) and p.config.selectedGC notin {gcArc, gcAtomicArc, gcOrc, gcHooks}:
       genGenericAsgn(p, dest, src, flags)
     else:
-      linefmt(p, cpsStmts,
-           "#nimCopyMem((void*)$1, (NIM_CONST void*)$2, sizeof($3));$n",
-           [rdLoc(dest), rdLoc(src), getTypeDesc(p.module, dest.t)])
+      let rd = rdLoc(dest)
+      let rs = rdLoc(src)
+      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimCopyMem"),
+        cCast("void*", rd),
+        cCast(ptrConstType("void"), rs),
+        cSizeof(getTypeDesc(p.module, dest.t)))
   of tyOpenArray, tyVarargs:
     # open arrays are always on the stack - really? What if a sequence is
     # passed to an open array?
     if reifiedOpenArray(dest.lode):
       genOpenArrayConv(p, dest, src, flags)
     elif containsGarbageCollectedRef(dest.t):
-      linefmt(p, cpsStmts,     # XXX: is this correct for arrays?
-           "#genericAssignOpenArray((void*)$1, (void*)$2, $1Len_0, $3);$n",
-           [addrLoc(p.config, dest), addrLoc(p.config, src),
-           genTypeInfoV1(p.module, dest.t, dest.lode.info)])
+      let rad = addrLoc(p.config, dest)
+      let ras = addrLoc(p.config, src)
+      # XXX: is this correct for arrays?
+      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericAssignOpenArray"),
+        cCast("void*", rad),
+        cCast("void*", ras),
+        rad & "Len_0",
+        genTypeInfoV1(p.module, dest.t, dest.lode.info))
     else:
-      linefmt(p, cpsStmts,
+      simpleAsgn(p.s(cpsStmts), dest, src)
+      #linefmt(p, cpsStmts,
            # bug #4799, keep the nimCopyMem for a while
-           #"#nimCopyMem((void*)$1, (NIM_CONST void*)$2, sizeof($1[0])*$1Len_0);\n",
-           "$1 = $2;$n",
-           [rdLoc(dest), rdLoc(src)])
+           #"#nimCopyMem((void*)$1, (NIM_CONST void*)$2, sizeof($1[0])*$1Len_0);\n")
   of tySet:
     if mapSetType(p.config, ty) == ctArray:
-      linefmt(p, cpsStmts, "#nimCopyMem((void*)$1, (NIM_CONST void*)$2, $3);$n",
-              [rdLoc(dest), rdLoc(src), getSize(p.config, dest.t)])
+      let rd = rdLoc(dest)
+      let rs = rdLoc(src)
+      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimCopyMem"),
+        cCast("void*", rd),
+        cCast(ptrConstType("void"), rs),
+        cIntValue(getSize(p.config, dest.t)))
     else:
-      linefmt(p, cpsStmts, "$1 = $2;$n", [rdLoc(dest), rdLoc(src)])
+      simpleAsgn(p.s(cpsStmts), dest, src)
   of tyPtr, tyPointer, tyChar, tyBool, tyEnum, tyCstring,
      tyInt..tyUInt64, tyRange, tyVar, tyLent, tyNil:
-    linefmt(p, cpsStmts, "$1 = $2;$n", [rdLoc(dest), rdLoc(src)])
+    simpleAsgn(p.s(cpsStmts), dest, src)
   else: internalError(p.config, "genAssignment: " & $ty.kind)
 
   if optMemTracker in p.options and dest.storage in {OnHeap, OnUnknown}:
     #writeStackTrace()
     #echo p.currLineInfo, " requesting"
-    linefmt(p, cpsStmts, "#memTrackerWrite((void*)$1, $2, $3, $4);$n",
-            [addrLoc(p.config, dest), getSize(p.config, dest.t),
-            makeCString(toFullPath(p.config, p.currLineInfo)),
-            p.currLineInfo.safeLineNm])
+    let rad = addrLoc(p.config, dest)
+    p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "memTrackerWrite"),
+      cCast("void*", rad),
+      cIntValue(getSize(p.config, dest.t)),
+      makeCString(toFullPath(p.config, p.currLineInfo)),
+      cIntValue(p.currLineInfo.safeLineNm))
 
 proc genDeepCopy(p: BProc; dest, src: TLoc) =
   template addrLocOrTemp(a: TLoc): Rope =
@@ -445,33 +485,48 @@ proc genDeepCopy(p: BProc; dest, src: TLoc) =
   case ty.kind
   of tyPtr, tyRef, tyProc, tyTuple, tyObject, tyArray:
     # XXX optimize this
-    linefmt(p, cpsStmts, "#genericDeepCopy((void*)$1, (void*)$2, $3);$n",
-            [addrLoc(p.config, dest), addrLocOrTemp(src),
-            genTypeInfoV1(p.module, dest.t, dest.lode.info)])
+    let rad = addrLoc(p.config, dest)
+    let rats = addrLocOrTemp(src)
+    p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericDeepCopy"),
+      cCast("void*", rad),
+      cCast("void*", rats),
+      genTypeInfoV1(p.module, dest.t, dest.lode.info))
   of tySequence, tyString:
     if optTinyRtti in p.config.globalOptions:
-      linefmt(p, cpsStmts, "#genericDeepCopy((void*)$1, (void*)$2, $3);$n",
-              [addrLoc(p.config, dest), addrLocOrTemp(src),
-              genTypeInfoV1(p.module, dest.t, dest.lode.info)])
+      let rad = addrLoc(p.config, dest)
+      let rats = addrLocOrTemp(src)
+      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericDeepCopy"),
+        cCast("void*", rad),
+        cCast("void*", rats),
+        genTypeInfoV1(p.module, dest.t, dest.lode.info))
     else:
-      linefmt(p, cpsStmts, "#genericSeqDeepCopy($1, $2, $3);$n",
-              [addrLoc(p.config, dest), rdLoc(src),
-              genTypeInfoV1(p.module, dest.t, dest.lode.info)])
+      let rad = addrLoc(p.config, dest)
+      let rs = rdLoc(src)
+      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericSeqDeepCopy"),
+        rad,
+        rs,
+        genTypeInfoV1(p.module, dest.t, dest.lode.info))
   of tyOpenArray, tyVarargs:
     let source = addrLocOrTemp(src)
-    linefmt(p, cpsStmts,
-         "#genericDeepCopyOpenArray((void*)$1, (void*)$2, $2->Field1, $3);$n",
-         [addrLoc(p.config, dest), source,
-         genTypeInfoV1(p.module, dest.t, dest.lode.info)])
+    let rad = addrLoc(p.config, dest)
+    p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "genericDeepCopyOpenArray"),
+      cCast("void*", rad),
+      cCast("void*", source),
+      derefField(source, "Field1"),
+      genTypeInfoV1(p.module, dest.t, dest.lode.info))
   of tySet:
     if mapSetType(p.config, ty) == ctArray:
-      linefmt(p, cpsStmts, "#nimCopyMem((void*)$1, (NIM_CONST void*)$2, $3);$n",
-              [rdLoc(dest), rdLoc(src), getSize(p.config, dest.t)])
+      let rd = rdLoc(dest)
+      let rs = rdLoc(src)
+      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "nimCopyMem"),
+        cCast("void*", rd),
+        cCast(ptrConstType("void"), rs),
+        cIntValue(getSize(p.config, dest.t)))
     else:
-      linefmt(p, cpsStmts, "$1 = $2;$n", [rdLoc(dest), rdLoc(src)])
+      simpleAsgn(p.s(cpsStmts), dest, src)
   of tyPointer, tyChar, tyBool, tyEnum, tyCstring,
      tyInt..tyUInt64, tyRange, tyVar, tyLent:
-    linefmt(p, cpsStmts, "$1 = $2;$n", [rdLoc(dest), rdLoc(src)])
+    simpleAsgn(p.s(cpsStmts), dest, src)
   else: internalError(p.config, "genDeepCopy: " & $ty.kind)
 
 proc putLocIntoDest(p: BProc, d: var TLoc, s: TLoc) =
@@ -519,7 +574,9 @@ proc binaryStmtAddr(p: BProc, e: PNode, d: var TLoc, cpname: string) =
   if d.k != locNone: internalError(p.config, e.info, "binaryStmtAddr")
   var a = initLocExpr(p, e[1])
   var b = initLocExpr(p, e[2])
-  lineCg(p, cpsStmts, "#$1($2, $3);$n", [cpname, byRefLoc(p, a), rdLoc(b)])
+  let bra = byRefLoc(p, a)
+  let rb = rdLoc(b)
+  p.s(cpsStmts).addCallStmt(cgsymValue(p.module, cpname), bra, rb)
 
 template unaryStmt(p: BProc, e: PNode, d: var TLoc, frmt: string) =
   if d.k != locNone: internalError(p.config, e.info, "unaryStmt")
@@ -554,21 +611,28 @@ template binaryArithOverflowRaw(p: BProc, t: PType, a, b: TLoc;
   let storage = if size < p.config.target.intSize: rope("NI")
                 else: getTypeDesc(p.module, t)
   var result = getTempName(p.module)
-  linefmt(p, cpsLocals, "$1 $2;$n", [storage, result])
-  lineCg(p, cpsStmts, "if (#$2($3, $4, &$1)) { #raiseOverflow(); ",
-      [result, cpname, rdCharLoc(a), rdCharLoc(b)])
-  raiseInstr(p, p.s(cpsStmts))
-  linefmt p, cpsStmts, "};$n", []
+  p.s(cpsLocals).addVar(kind = Local, name = result, typ = storage)
+  let rca = rdCharLoc(a)
+  let rcb = rdCharLoc(b)
+  p.s(cpsStmts).addSingleIfStmtWithCond():
+    p.s(cpsStmts).addCall(cgsymValue(p.module, cpname),
+      rca,
+      rcb,
+      cAddr(result))
+  do:
+    p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "raiseOverflow"))
+    raiseInstr(p, p.s(cpsStmts))
 
   if size < p.config.target.intSize or t.kind in {tyRange, tyEnum}:
-    var first = newRopeAppender()
-    intLiteral(firstOrd(p.config, t), first)
-    var last = newRopeAppender()
-    intLiteral(lastOrd(p.config, t), last)
-    linefmt(p, cpsStmts, "if ($1 < $2 || $1 > $3){ #raiseOverflow(); ",
-            [result, first, last])
-    raiseInstr(p, p.s(cpsStmts))
-    linefmt p, cpsStmts, "}$n", []
+    let first = cIntLiteral(firstOrd(p.config, t))
+    let last = cIntLiteral(lastOrd(p.config, t))
+    p.s(cpsStmts).addSingleIfStmtWithCond():
+      p.s(cpsStmts).addOp(Or,
+        cOp(LessThan, result, first),
+        cOp(GreaterThan, result, last))
+    do:
+      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "raiseOverflow"))
+      raiseInstr(p, p.s(cpsStmts))
 
   result
 
@@ -584,7 +648,7 @@ proc binaryArithOverflow(p: BProc, e: PNode, d: var TLoc, m: TMagic) =
       "nimMulInt64", "nimDivInt64", "nimModInt64",
       "nimAddInt64", "nimSubInt64"
     ]
-    opr: array[mAddI..mPred, string] = ["+", "-", "*", "/", "%", "+", "-"]
+    opr: array[mAddI..mPred, TypedBinaryOp] = [Add, Sub, Mul, Div, Mod, Add, Sub]
   assert(e[1].typ != nil)
   assert(e[2].typ != nil)
   var a = initLocExpr(p, e[1])
@@ -593,7 +657,8 @@ proc binaryArithOverflow(p: BProc, e: PNode, d: var TLoc, m: TMagic) =
   # later via 'chckRange'
   let t = e.typ.skipTypes(abstractRange)
   if optOverflowCheck notin p.options or (m in {mSucc, mPred} and t.kind in {tyUInt..tyUInt64}):
-    let res = "($1)($2 $3 $4)" % [getTypeDesc(p.module, e.typ), rdLoc(a), rope(opr[m]), rdLoc(b)]
+    let typ = getTypeDesc(p.module, e.typ)
+    let res = cCast(typ, cOp(opr[m], typ, rdLoc(a), rdLoc(b)))
     putIntoDest(p, d, e, res)
   else:
     # we handle div by zero here so that we know that the compilerproc's
@@ -606,15 +671,17 @@ proc binaryArithOverflow(p: BProc, e: PNode, d: var TLoc, m: TMagic) =
       if e[2].kind in {nkIntLit..nkInt64Lit}:
         needsOverflowCheck = e[2].intVal == -1
       if canBeZero:
-        linefmt(p, cpsStmts, "if ($1 == 0){ #raiseDivByZero(); ", [rdLoc(b)])
-        raiseInstr(p, p.s(cpsStmts))
-        linefmt(p, cpsStmts, "}$n", [])
+        # remove extra paren from `==` op here to avoid Wparentheses-equality: 
+        p.s(cpsStmts).addSingleIfStmt(removeSinglePar(cOp(Equal, rdLoc(b), cIntValue(0)))):
+          p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "raiseDivByZero"))
+          raiseInstr(p, p.s(cpsStmts))
     if needsOverflowCheck:
       let res = binaryArithOverflowRaw(p, t, a, b,
         if t.kind == tyInt64: prc64[m] else: prc[m])
-      putIntoDest(p, d, e, "($#)($#)" % [getTypeDesc(p.module, e.typ), res])
+      putIntoDest(p, d, e, cCast(getTypeDesc(p.module, e.typ), res))
     else:
-      let res = "($1)(($2) $3 ($4))" % [getTypeDesc(p.module, e.typ), rdLoc(a), rope(opr[m]), rdLoc(b)]
+      let typ = getTypeDesc(p.module, e.typ)
+      let res = cCast(typ, cOp(opr[m], typ, wrapPar(rdLoc(a)), wrapPar(rdLoc(b))))
       putIntoDest(p, d, e, res)
 
 proc unaryArithOverflow(p: BProc, e: PNode, d: var TLoc, m: TMagic) =
@@ -622,21 +689,25 @@ proc unaryArithOverflow(p: BProc, e: PNode, d: var TLoc, m: TMagic) =
   assert(e[1].typ != nil)
   var a: TLoc = initLocExpr(p, e[1])
   t = skipTypes(e.typ, abstractRange)
+  let ra = rdLoc(a)
   if optOverflowCheck in p.options:
-    var first = newRopeAppender()
-    intLiteral(firstOrd(p.config, t), first)
-    linefmt(p, cpsStmts, "if ($1 == $2){ #raiseOverflow(); ",
-            [rdLoc(a), first])
-    raiseInstr(p, p.s(cpsStmts))
-    linefmt p, cpsStmts, "}$n", []
+    let first = cIntLiteral(firstOrd(p.config, t))
+    # remove extra paren from `==` op here to avoid Wparentheses-equality: 
+    p.s(cpsStmts).addSingleIfStmt(removeSinglePar(cOp(Equal, ra, first))):
+      p.s(cpsStmts).addCallStmt(cgsymValue(p.module, "raiseOverflow"))
+      raiseInstr(p, p.s(cpsStmts))
 
   case m
   of mUnaryMinusI:
-    putIntoDest(p, d, e, "((NI$2)-($1))" % [rdLoc(a), rope(getSize(p.config, t) * 8)])
+    let typ = "NI" & rope(getSize(p.config, t) * 8)
+    putIntoDest(p, d, e, cCast(typ, cOp(Neg, typ, ra)))
   of mUnaryMinusI64:
-    putIntoDest(p, d, e, "-($1)" % [rdLoc(a)])
+    putIntoDest(p, d, e, cOp(Neg, getTypeDesc(p.module, t), ra))
   of mAbsI:
-    putIntoDest(p, d, e, "($1 > 0? ($1) : -($1))" % [rdLoc(a)])
+    putIntoDest(p, d, e,
+      cIfExpr(cOp(GreaterThan, ra, cIntValue(0)),
+        wrapPar(ra),
+        cOp(Neg, getTypeDesc(p.module, t), ra)))
   else:
     assert(false, $m)
 
@@ -770,18 +841,25 @@ proc genEqProc(p: BProc, e: PNode, d: var TLoc) =
   assert(e[2].typ != nil)
   var a = initLocExpr(p, e[1])
   var b = initLocExpr(p, e[2])
+  let ra = rdLoc(a)
+  let rb = rdLoc(b)
   if a.t.skipTypes(abstractInstOwned).callConv == ccClosure:
-    putIntoDest(p, d, e,
-      "($1.ClP_0 == $2.ClP_0 && $1.ClE_0 == $2.ClE_0)" % [rdLoc(a), rdLoc(b)])
+    putIntoDest(p, d, e, cOp(And,
+      cOp(Equal, dotField(ra, "ClP_0"), dotField(rb, "ClP_0")),
+      cOp(Equal, dotField(ra, "ClE_0"), dotField(rb, "ClE_0"))))
   else:
-    putIntoDest(p, d, e, "($1 == $2)" % [rdLoc(a), rdLoc(b)])
+    putIntoDest(p, d, e, cOp(Equal, ra, rb))
 
 proc genIsNil(p: BProc, e: PNode, d: var TLoc) =
   let t = skipTypes(e[1].typ, abstractRange)
+  var a: TLoc = initLocExpr(p, e[1])
+  let ra = rdLoc(a)
+  var res = ""
   if t.kind == tyProc and t.callConv == ccClosure:
-    unaryExpr(p, e, d, "($1.ClP_0 == 0)")
+    res = cOp(Equal, dotField(ra, "ClP_0"), cIntValue(0))
   else:
-    unaryExpr(p, e, d, "($1 == 0)")
+    res = cOp(Equal, ra, cIntValue(0))
+  putIntoDest(p, d, e, res)
 
 proc unaryArith(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   var
@@ -867,7 +945,7 @@ proc genDeref(p: BProc, e: PNode, d: var TLoc) =
       # so the '&' and '*' cancel out:
       putIntoDest(p, d, e, rdLoc(a), a.storage)
     else:
-      putIntoDest(p, d, e, "(*$1)" % [rdLoc(a)], a.storage)
+      putIntoDest(p, d, e, cDeref(rdLoc(a)), a.storage)
 
 proc cowBracket(p: BProc; n: PNode) =
   if n.kind == nkBracketExpr and optSeqDestructors in p.config.globalOptions:
@@ -1749,8 +1827,7 @@ proc genNewFinalize(p: BProc, e: PNode) =
   var f = initLocExpr(p, e[2])
   b = initLoc(locExpr, a.lode, OnHeap)
   ti = genTypeInfo(p.config, p.module, refType, e.info)
-  p.module.s[cfsTypeInit3].addDerefFieldAssignment(ti, "finalizer"):
-    p.module.s[cfsTypeInit3].add(cCast("void*", rdLoc(f)))
+  p.module.s[cfsTypeInit3].addDerefFieldAssignment(ti, "finalizer", cCast("void*", rdLoc(f)))
   b.snippet = ropecg(p.module, "($1) #newObj($2, sizeof($3))", [
       getTypeDesc(p.module, refType),
       ti, getTypeDesc(p.module, skipTypes(refType.elementType, abstractRange))])
@@ -1973,8 +2050,7 @@ proc genArrayLen(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
     var a = initLocExpr(p, e[1])
     var x = lenExpr(p, a)
     if op == mHigh: x = "($1-1)" % [x]
-    p.s(cpsStmts).addAssignment(tmp.snippet):
-      p.s(cpsStmts).add(x)
+    p.s(cpsStmts).addAssignment(tmp.snippet, x)
     putIntoDest(p, d, e, tmp.snippet)
   of tyArray:
     # YYY: length(sideeffect) is optimized away incorrectly?
@@ -2421,15 +2497,15 @@ proc genMove(p: BProc; n: PNode; d: var TLoc) =
   if n.len == 4:
     # generated by liftdestructors:
     var src: TLoc = initLocExpr(p, n[2])
-    linefmt(p, cpsStmts, "if ($1.p != $2.p) {", [rdLoc(a), rdLoc(src)])
-    genStmts(p, n[3])
-    linefmt(p, cpsStmts, "}$n", [])
     let destVal = rdLoc(a)
     let srcVal = rdLoc(src)
-    p.s(cpsStmts).addFieldAssignment(destVal, "len"):
-      p.s(cpsStmts).add(dotField(srcVal, "len"))
-    p.s(cpsStmts).addFieldAssignment(destVal, "p"):
-      p.s(cpsStmts).add(dotField(srcVal, "p"))
+    p.s(cpsStmts).addSingleIfStmt(
+      cOp(NotEqual,
+        dotField(destVal, "p"),
+        dotField(srcVal, "p"))):
+      genStmts(p, n[3])
+    p.s(cpsStmts).addFieldAssignment(destVal, "len", dotField(srcVal, "len"))
+    p.s(cpsStmts).addFieldAssignment(destVal, "p", dotField(srcVal, "p"))
   else:
     if d.k == locNone: d = getTemp(p, n.typ)
     if p.config.selectedGC in {gcArc, gcAtomicArc, gcOrc}:
@@ -2518,10 +2594,8 @@ proc genSlice(p: BProc; e: PNode; d: var TLoc) =
                          p.config.selectedGC in {gcArc, gcAtomicArc, gcOrc})
   if d.k == locNone: d = getTemp(p, e.typ)
   let dest = rdLoc(d)
-  p.s(cpsStmts).addFieldAssignment(dest, "Field0"):
-    p.s(cpsStmts).add(x)
-  p.s(cpsStmts).addFieldAssignment(dest, "Field1"):
-    p.s(cpsStmts).add(y)
+  p.s(cpsStmts).addFieldAssignment(dest, "Field0", x)
+  p.s(cpsStmts).addFieldAssignment(dest, "Field1", y)
   when false:
     localError(p.config, e.info, "invalid context for 'toOpenArray'; " &
       "'toOpenArray' is only valid within a call expression")
@@ -2764,8 +2838,7 @@ proc genSetConstr(p: BProc, e: PNode, d: var TLoc) =
     else:
       # small set
       var ts = "NU" & $(getSize(p.config, e.typ) * 8)
-      p.s(cpsStmts).addAssignment(rdLoc(d)):
-        p.s(cpsStmts).addIntValue(0)
+      p.s(cpsStmts).addAssignment(rdLoc(d), cIntValue(0))
       for it in e.sons:
         if it.kind == nkRange:
           idx = getTemp(p, getSysType(p.module.g.graph, unknownLineInfo, tyInt)) # our counter
@@ -2843,17 +2916,13 @@ proc genClosure(p: BProc, n: PNode, d: var TLoc) =
     when false:
       if d.k != locNone:
         let dest = d.rdLoc
-        p.s(cpsStmts).addFieldAssignment(dest, "ClP_0"):
-          p.s(cpsStmts).add(a.rdLoc)
-        p.s(cpsStmts).addFieldAssignment(dest, "ClE_0"):
-          p.s(cpsStmts).add(b.rdLoc)
+        p.s(cpsStmts).addFieldAssignment(dest, "ClP_0", a.rdLoc)
+        p.s(cpsStmts).addFieldAssignment(dest, "ClE_0", b.rdLoc)
     else:
       tmp = getTemp(p, n.typ)
       let dest = tmp.rdLoc
-      p.s(cpsStmts).addFieldAssignment(dest, "ClP_0"):
-        p.s(cpsStmts).add(a.rdLoc)
-      p.s(cpsStmts).addFieldAssignment(dest, "ClE_0"):
-        p.s(cpsStmts).add(b.rdLoc)
+      p.s(cpsStmts).addFieldAssignment(dest, "ClP_0", a.rdLoc)
+      p.s(cpsStmts).addFieldAssignment(dest, "ClE_0", b.rdLoc)
       putLocIntoDest(p, d, tmp)
 
 proc genArrayConstr(p: BProc, n: PNode, d: var TLoc) =
@@ -3034,14 +3103,12 @@ proc genConstHeader(m, q: BModule; p: BProc, sym: PSym) =
     m.s[cfsVars].addVar(kind = Global, name = sym.loc.snippet,
       typ = ptrType(getTypeDesc(m, sym.loc.t, dkVar)))
     m.initProc.procSec(cpsLocals).add('\t')
-    m.initProc.procSec(cpsLocals).addAssignment(sym.loc.snippet):
+    m.initProc.procSec(cpsLocals).addAssignmentWithValue(sym.loc.snippet):
       m.initProc.procSec(cpsLocals).addCast(ptrType(getTypeDesc(m, sym.loc.t, dkVar))):
         var getGlobalCall: CallBuilder
-        m.initProc.procSec(cpsLocals).addCall(getGlobalCall, "hcrGetGlobal"):
-          m.initProc.procSec(cpsLocals).addArgument(getGlobalCall):
-            m.initProc.procSec(cpsLocals).add(getModuleDllPath(q, sym))
-          m.initProc.procSec(cpsLocals).addArgument(getGlobalCall):
-            m.initProc.procSec(cpsLocals).add('"' & sym.loc.snippet & '"')
+        m.initProc.procSec(cpsLocals).addCall("hcrGetGlobal",
+          getModuleDllPath(q, sym),
+          '"' & sym.loc.snippet & '"')
   else:
     var headerDecl = newBuilder("")
     headerDecl.addDeclWithVisibility(Extern):
@@ -3090,7 +3157,7 @@ proc genConstDefinition(q: BModule; p: BProc; sym: PSym) =
         q.initProc.procSec(cpsLocals).addArgument(copyCall):
           q.initProc.procSec(cpsLocals).add(cCast("void*", sym.loc.snippet))
         q.initProc.procSec(cpsLocals).addArgument(copyCall):
-          q.initProc.procSec(cpsLocals).add(cCast(constType("void*"), cAddr(actualConstName)))
+          q.initProc.procSec(cpsLocals).add(cCast(ptrConstType("void"), cAddr(actualConstName)))
         q.initProc.procSec(cpsLocals).addArgument(copyCall):
           q.initProc.procSec(cpsLocals).addSizeof(rdLoc(sym.loc))
 

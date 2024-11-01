@@ -2,7 +2,14 @@
 # XXX add stuff like NI, NIM_NIL as constants
 
 proc constType(t: Snippet): Snippet =
+  # needs manipulation of `t` in nifc
   "NIM_CONST " & t
+
+proc constPtrType(t: Snippet): Snippet =
+  t & "* NIM_CONST"
+
+proc ptrConstType(t: Snippet): Snippet =
+  "NIM_CONST " & t & "*"
 
 proc ptrType(t: Snippet): Snippet =
   t & "*"
@@ -16,8 +23,11 @@ const
     "N_NOCONV" #ccMember is N_NOCONV
     ]
 
-proc procPtrType(conv: TCallingConvention, rettype: Snippet, name: string): Snippet =
-  CallingConvToStr[conv] & "_PTR(" & rettype & ", " & name & ")"
+proc procPtrTypeUnnamed(rettype, params: Snippet): Snippet =
+  rettype & "(*)" & params
+
+proc procPtrTypeUnnamedNimCall(rettype, params: Snippet): Snippet =
+  rettype & "(N_RAW_NIMCALL*)" & params
 
 proc cCast(typ, value: Snippet): Snippet =
   "((" & typ & ") " & value & ")"
@@ -25,6 +35,11 @@ proc cCast(typ, value: Snippet): Snippet =
 proc wrapPar(value: Snippet): Snippet =
   # used for expression group, no-op on sexp
   "(" & value & ")"
+
+proc removeSinglePar(value: Snippet): Snippet =
+  # removes a single paren layer expected to exist, to silence Wparentheses-equality
+  assert value[0] == '(' and value[^1] == ')'
+  value[1..^2]
 
 template addCast(builder: var Builder, typ: Snippet, valueBody: typed) =
   ## adds a cast to `typ` with value built by `valueBody`
@@ -75,15 +90,25 @@ template addCall(builder: var Builder, call: out CallBuilder, callee: Snippet, b
   body
   finishCallBuilder(builder, call)
 
-proc addNullaryCall(builder: var Builder, callee: Snippet) =
-  builder.add(callee)
-  builder.add("()")
-
-proc addUnaryCall(builder: var Builder, callee: Snippet, arg: Snippet) =
+proc addCall(builder: var Builder, callee: Snippet, args: varargs[Snippet]) =
   builder.add(callee)
   builder.add("(")
-  builder.add(arg)
+  if args.len != 0:
+    builder.add(args[0])
+    for i in 1 ..< args.len:
+      builder.add(", ")
+      builder.add(args[i])
   builder.add(")")
+
+proc cCall(callee: Snippet, args: varargs[Snippet]): Snippet =
+  result = callee
+  result.add("(")
+  if args.len != 0:
+    result.add(args[0])
+    for i in 1 ..< args.len:
+      result.add(", ")
+      result.add(args[i])
+  result.add(")")
 
 proc addSizeof(builder: var Builder, val: Snippet) =
   builder.add("sizeof(")
