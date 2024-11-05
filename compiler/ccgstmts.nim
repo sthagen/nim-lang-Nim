@@ -289,16 +289,16 @@ proc potentialValueInit(p: BProc; v: PSym; value: PNode; result: var Builder) =
     #echo "New code produced for ", v.name.s, " ", p.config $ value.info
     genBracedInit(p, value, isConst = false, v.typ, result)
 
-proc genCppParamsForCtor(p: BProc; call: PNode; didGenTemp: var bool): string =
-  result = ""
-  var argsCounter = 0
+proc genCppParamsForCtor(p: BProc; call: PNode; didGenTemp: var bool): Snippet =
+  var res = newBuilder("")
+  var argBuilder = default(CallBuilder) # not init, only building params
   let typ = skipTypes(call[0].typ, abstractInst)
   assert(typ.kind == tyProc)
   for i in 1..<call.len:
     #if it's a type we can just generate here another initializer as we are in an initializer context
     if call[i].kind == nkCall and call[i][0].kind == nkSym and call[i][0].sym.kind == skType:
-      if argsCounter > 0: result.add ","
-      result.add genCppInitializer(p.module, p, call[i][0].sym.typ, didGenTemp)
+      res.addArgument(argBuilder):
+        res.add genCppInitializer(p.module, p, call[i][0].sym.typ, didGenTemp)
     else:
       #We need to test for temp in globals, see: #23657
       let param =
@@ -311,7 +311,8 @@ proc genCppParamsForCtor(p: BProc; call: PNode; didGenTemp: var bool): string =
           tyVarargs, tySequence, tyString, tyCstring, tyTuple}:
         let tempLoc = initLocExprSingleUse(p, param)
         didGenTemp = didGenTemp or tempLoc.k == locTemp
-      genOtherArg(p, call, i, typ, result, argsCounter)
+      genOtherArg(p, call, i, typ, res, argBuilder)
+  result = extract(res)
 
 proc genCppVarForCtor(p: BProc; call: PNode; decl: var Rope, didGenTemp: var bool) =
   let params = genCppParamsForCtor(p, call, didGenTemp)
@@ -959,7 +960,7 @@ proc ifSwitchSplitPoint(p: BProc, n: PNode): int =
       if branch.kind == nkOfBranch and branchHasTooBigRange(branch):
         result = i
 
-proc genCaseRange(p: BProc, branch: PNode) =
+proc genCaseRange(p: BProc, branch: PNode, info: var SwitchCaseBuilder) =
   for j in 0..<branch.len-1:
     if branch[j].kind == nkRange:
       if hasSwitchRange in CC[p.config.cCompiler].props:
@@ -967,18 +968,18 @@ proc genCaseRange(p: BProc, branch: PNode) =
         var litB = newBuilder("")
         genLiteral(p, branch[j][0], litA)
         genLiteral(p, branch[j][1], litB)
-        lineF(p, cpsStmts, "case $1 ... $2:$n", [extract(litA), extract(litB)])
+        p.s(cpsStmts).addCaseRange(info, extract(litA), extract(litB))
       else:
         var v = copyNode(branch[j][0])
         while v.intVal <= branch[j][1].intVal:
           var litA = newBuilder("")
           genLiteral(p, v, litA)
-          lineF(p, cpsStmts, "case $1:$n", [extract(litA)])
+          p.s(cpsStmts).addCase(info, extract(litA))
           inc(v.intVal)
     else:
       var litA = newBuilder("")
       genLiteral(p, branch[j], litA)
-      lineF(p, cpsStmts, "case $1:$n", [extract(litA)])
+      p.s(cpsStmts).addCase(info, extract(litA))
 
 proc genOrdinalCase(p: BProc, n: PNode, d: var TLoc) =
   # analyse 'case' statement:
@@ -993,26 +994,31 @@ proc genOrdinalCase(p: BProc, n: PNode, d: var TLoc) =
 
   # generate switch part (might be empty):
   if splitPoint+1 < n.len:
-    lineF(p, cpsStmts, "switch ($1) {$n", [rdCharLoc(a)])
-    var hasDefault = false
-    for i in splitPoint+1..<n.len:
-      # bug #4230: avoid false sharing between branches:
-      if d.k == locTemp and isEmptyType(n.typ): d.k = locNone
-      var branch = n[i]
-      if branch.kind == nkOfBranch:
-        genCaseRange(p, branch)
-      else:
-        # else part of case statement:
-        lineF(p, cpsStmts, "default:$n", [])
-        hasDefault = true
-      exprBlock(p, branch.lastSon, d)
-      lineF(p, cpsStmts, "break;$n", [])
-    if not hasDefault:
-      if hasBuiltinUnreachable in CC[p.config.cCompiler].props:
-        lineF(p, cpsStmts, "default: __builtin_unreachable();$n", [])
-      elif hasAssume in CC[p.config.cCompiler].props:
-        lineF(p, cpsStmts, "default: __assume(0);$n", [])
-    lineF(p, cpsStmts, "}$n", [])
+    let rca = rdCharLoc(a)
+    p.s(cpsStmts).addSwitchStmt(rca):
+      var hasDefault = false
+      for i in splitPoint+1..<n.len:
+        # bug #4230: avoid false sharing between branches:
+        if d.k == locTemp and isEmptyType(n.typ): d.k = locNone
+        var branch = n[i]
+        var caseBuilder: SwitchCaseBuilder
+        p.s(cpsStmts).addSwitchCase(caseBuilder):
+          if branch.kind == nkOfBranch:
+            genCaseRange(p, branch, caseBuilder)
+          else:
+            # else part of case statement:
+            hasDefault = true
+            p.s(cpsStmts).addCaseElse(caseBuilder)
+        do:
+          exprBlock(p, branch.lastSon, d)
+          p.s(cpsStmts).addBreak()
+      if not hasDefault:
+        if hasBuiltinUnreachable in CC[p.config.cCompiler].props:
+          p.s(cpsStmts).addSwitchElse():
+            p.s(cpsStmts).addCallStmt("__builtin_unreachable")
+        elif hasAssume in CC[p.config.cCompiler].props:
+          p.s(cpsStmts).addSwitchElse():
+            p.s(cpsStmts).addCallStmt("__assume", cIntValue(0))
   if lend != "": fixLabel(p, lend)
 
 proc genCase(p: BProc, t: PNode, d: var TLoc) =
