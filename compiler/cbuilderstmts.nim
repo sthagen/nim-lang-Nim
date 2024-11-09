@@ -257,21 +257,26 @@ proc addLabel(builder: var Builder, name: TLabel) =
 proc addReturn(builder: var Builder) =
   builder.add("return;\n")
 
-proc addReturn(builder: var Builder, value: string) =
+proc addReturn(builder: var Builder, value: Snippet) =
   builder.add("return ")
   builder.add(value)
   builder.add(";\n")
 
-template addGoto(builder: var Builder, label: TLabel) =
+proc addGoto(builder: var Builder, label: TLabel) =
   builder.add("goto ")
   builder.add(label)
   builder.add(";\n")
 
-template addIncr(builder: var Builder, val: Snippet) =
+proc addComputedGoto(builder: var Builder, value: Snippet) =
+  builder.add("goto *")
+  builder.add(value)
+  builder.add(";\n")
+
+proc addIncr(builder: var Builder, val: Snippet) =
   builder.add(val)
   builder.add("++;\n")
 
-template addDecr(builder: var Builder, val: Snippet) =
+proc addDecr(builder: var Builder, val: Snippet) =
   builder.add(val)
   builder.add("--;\n")
 
