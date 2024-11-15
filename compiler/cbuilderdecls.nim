@@ -468,6 +468,19 @@ proc addUnnamedParam(builder: var Builder, params: var ProcParamBuilder, typ: Sn
     params.needsComma = true
   builder.add(typ)
 
+proc addProcTypedParam(builder: var Builder, paramBuilder: var ProcParamBuilder, callConv: TCallingConvention, name: string, rettype, params: Snippet) =
+  if paramBuilder.needsComma:
+    builder.add(", ")
+  else:
+    paramBuilder.needsComma = true
+  builder.add(CallingConvToStr[callConv])
+  builder.add("_PTR(")
+  builder.add(rettype)
+  builder.add(", ")
+  builder.add(name)
+  builder.add(")")
+  builder.add(params)
+
 proc addVarargsParam(builder: var Builder, params: var ProcParamBuilder) =
   # does not exist in NIFC, needs to be proc pragma
   if params.needsComma:
@@ -480,6 +493,20 @@ template addProcParams(builder: var Builder, params: out ProcParamBuilder, body:
   params = initProcParamBuilder(builder)
   body
   finishProcParamBuilder(builder, params)
+
+type SimpleProcParam = tuple
+  name, typ: string
+
+proc cProcParams(params: varargs[SimpleProcParam]): Snippet =
+  if params.len == 0: return "(void)"
+  result = "("
+  for i in 0 ..< params.len:
+    if i != 0: result.add(", ")
+    result.add(params[i].typ)
+    if params[i].name.len != 0:
+      result.add(" ")
+      result.add(params[i].name)
+  result.add(")")
 
 template addProcHeaderWithParams(builder: var Builder, callConv: TCallingConvention,
                                  name: string, rettype: Snippet, paramBuilder: typed) =
@@ -501,6 +528,15 @@ proc addProcHeader(builder: var Builder, callConv: TCallingConvention,
   # or enforce this with secondary builder object
   addProcHeaderWithParams(builder, callConv, name, rettype):
     builder.add(params)
+
+proc addProcHeader(builder: var Builder, name: string, rettype, params: Snippet, isConstructor = false) =
+  # no callconv
+  builder.add(rettype)
+  builder.add(" ")
+  if isConstructor:
+    builder.add("__attribute__((constructor)) ")
+  builder.add(name)
+  builder.add(params)
 
 proc addProcHeader(builder: var Builder, m: BModule, prc: PSym, name: string, params, rettype: Snippet, addAttributes: bool) =
   # on nifc should build something like (proc name params type pragmas
@@ -560,7 +596,8 @@ proc addProcVar(builder: var Builder, m: BModule, prc: PSym, name: string, param
   builder.addLineEnd(";")
 
 proc addProcVar(builder: var Builder, callConv: TCallingConvention,
-                name: string, params, rettype: Snippet, isStatic = false) =
+                name: string, params, rettype: Snippet,
+                isStatic = false, isVolatile = false) =
   # on nifc, builds full variable
   if isStatic:
     builder.add("static ")
@@ -568,6 +605,24 @@ proc addProcVar(builder: var Builder, callConv: TCallingConvention,
   builder.add("_PTR(")
   builder.add(rettype)
   builder.add(", ")
+  if isVolatile:
+    builder.add("volatile ")
+  builder.add(name)
+  builder.add(")")
+  builder.add(params)
+  # ensure we are just adding a variable:
+  builder.addLineEnd(";")
+
+proc addProcVar(builder: var Builder,
+                name: string, params, rettype: Snippet,
+                isStatic = false, isVolatile = false) =
+  # no callconv
+  if isStatic:
+    builder.add("static ")
+  builder.add(rettype)
+  builder.add(" (*")
+  if isVolatile:
+    builder.add("volatile ")
   builder.add(name)
   builder.add(")")
   builder.add(params)
