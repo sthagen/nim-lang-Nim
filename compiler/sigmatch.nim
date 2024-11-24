@@ -1878,9 +1878,12 @@ proc typeRel(c: var TCandidate, f, aOrig: PType,
       let target = f.genericHead
       let targetKind = target.kind
       var effectiveArgType = reduceToBase(a)
+      # the skipped child of tyBuiltInTypeClass can be structured differently,
+      # newConstraint constructs them with no children
+      let typeClassArg = effectiveArgType.kind == tyBuiltInTypeClass
       effectiveArgType = effectiveArgType.skipTypes({tyBuiltInTypeClass})
       if targetKind == effectiveArgType.kind:
-        if effectiveArgType.isEmptyContainer:
+        if not typeClassArg and effectiveArgType.isEmptyContainer:
           return isNone
         if targetKind == tyProc:
           if target.flags * {tfIterator} != effectiveArgType.flags * {tfIterator}:
@@ -2287,7 +2290,7 @@ proc isLValue(c: PContext; n: PNode, isOutParam = false): bool {.inline.} =
     result = c.inUncheckedAssignSection > 0
   of arAddressableConst:
     let sym = getRoot(n)
-    result = strictDefs in c.features and sym != nil and sym.kind == skLet and isOutParam
+    result = noStrictDefs notin c.config.legacyFeatures and sym != nil and sym.kind == skLet and isOutParam
   else:
     result = false
 
