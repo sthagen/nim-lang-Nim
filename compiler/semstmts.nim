@@ -492,19 +492,8 @@ proc semIdentDef(c: PContext, n: PNode, kind: TSymKind, reportToNimsuggest = tru
       incl(result.flags, sfGlobal)
   result.options = c.config.options
 
-  proc getLineInfo(n: PNode): TLineInfo =
-    case n.kind
-    of nkPostfix:
-      if len(n) > 1:
-        return getLineInfo(n[1])
-    of nkAccQuoted, nkPragmaExpr:
-      if len(n) > 0:
-        return getLineInfo(n[0])
-    else:
-      discard
-    result = n.info
-  let info = getLineInfo(n)
   if reportToNimsuggest:
+    let info = getLineInfo(n)
     suggestSym(c.graph, info, result, c.graph.usageSym)
 
 proc checkNilable(c: PContext; v: PSym) =
@@ -1787,6 +1776,17 @@ proc typeSectionFinalPass(c: PContext, n: PNode) =
     # check the style here after the pragmas have been processed:
     styleCheckDef(c, s)
     # compute the type's size and check for illegal recursions:
+    if a[0].kind == nkPragmaExpr:
+      let pragmas = a[0][1]
+      for i in 0 ..< pragmas.len:
+        if pragmas[i].kind == nkExprColonExpr and
+            pragmas[i][0].kind == nkIdent and
+            whichKeyword(pragmas[i][0].ident) == wSize:
+          if s.typ.kind != tyEnum and sfImportc notin s.flags:
+            # EventType* {.size: sizeof(uint32).} = enum
+            # AtomicFlag* {.importc: "atomic_flag", header: "<stdatomic.h>", size: 1.} = object
+            localError(c.config, pragmas[i].info, "size pragma only allowed for enum types and imported types")
+
     if a[1].kind == nkEmpty:
       var x = a[2]
       if x.kind in nkCallKinds and nfSem in x.flags:
