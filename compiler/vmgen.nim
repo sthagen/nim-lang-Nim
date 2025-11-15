@@ -1550,7 +1550,8 @@ proc genAsgn(c: PCtx; dest: TDest; ri: PNode; requiresCopy: bool) =
 proc setSlot(c: PCtx; v: PSym) =
   # XXX generate type initialization here?
   if v.position == 0:
-    v.position = getFreeRegister(c, if v.kind == skLet: slotFixedLet else: slotFixedVar, start = 1)
+    # IC: review this solution again later
+    v.positionImpl = getFreeRegister(c, if v.kind == skLet: slotFixedLet else: slotFixedVar, start = 1)
 
 template cannotEval(c: PCtx; n: PNode) =
   if c.config.cmd == cmdCheck and c.config.m.errorOutputs != {}:
@@ -1790,7 +1791,7 @@ proc genRdVar(c: PCtx; n: PNode; dest: var TDest; flags: TGenFlags) =
       # see tests/t99bott for an example that triggers it:
       cannotEval(c, n)
 
-template needsRegLoad(): untyped =
+template needsRegLoad(): untyped {.dirty.} =
   {gfNode, gfNodeAddr} * flags == {} and
     fitsRegister(n.typ.skipTypes({tyVar, tyLent, tyStatic}))
 
@@ -2128,7 +2129,7 @@ proc genTupleConstr(c: PCtx, n: PNode, dest: var TDest) =
         c.preventFalseAlias(it, opcWrObj, dest, i.TRegister, tmp)
         c.freeTemp(tmp)
 
-proc genProc*(c: PCtx; s: PSym): int
+proc genProc*(c: PCtx; s: PSym): VmProcInfo
 
 proc toKey(s: PSym): string =
   result = ""
@@ -2412,27 +2413,19 @@ proc optimizeJumps(c: PCtx; start: int) =
         c.finalJumpTarget(i, d - i)
     else: discard
 
-proc genProc(c: PCtx; s: PSym): int =
-  let
-    pos = c.procToCodePos.getOrDefault(s.id)
-    wasNotGenProcBefore = pos == 0
-    noRegistersAllocated = s.offset == -1
-  if wasNotGenProcBefore or noRegistersAllocated:
-    # xxx: the noRegisterAllocated check is required in order to avoid issues
-    #      where nimsuggest can crash due as a macro with pos will be loaded
-    #      but it doesn't have offsets for register allocations see:
-    #      https://github.com/nim-lang/Nim/issues/18385
-    #      Improvements and further use of IC should remove the need for this.
+proc genProc(c: PCtx; s: PSym): VmProcInfo =
+  result = c.procToCodePos.getOrDefault(s.id, NoVmProcInfo)
+  if result.usedRegisters < 0:
     #if s.name.s == "outterMacro" or s.name.s == "innerProc":
     #  echo "GENERATING CODE FOR ", s.name.s
     let last = c.code.len-1
-    var eofInstr: TInstr = default(TInstr)
+    var eofInstr = default(TInstr)
     if last >= 0 and c.code[last].opcode == opcEof:
       eofInstr = c.code[last]
       c.code.setLen(last)
       c.debug.setLen(last)
     #c.removeLastEof
-    result = c.code.len+1 # skip the jump instruction
+    result.pc = (c.code.len+1).int32 # skip the jump instruction
     c.procToCodePos[s.id] = result
     # thanks to the jmp we can add top level statements easily and also nest
     # procs easily:
@@ -2457,12 +2450,12 @@ proc genProc(c: PCtx; s: PSym): int =
     c.gABC(body, opcRet)
     c.patch(procStart)
     c.gABC(body, opcEof, eofInstr.regA)
-    c.optimizeJumps(result)
-    s.offset = c.prc.regInfo.len.int32
+    c.optimizeJumps(result.pc)
+    result.usedRegisters = c.prc.regInfo.len.int32
+    c.procToCodePos[s.id] = result
     #if s.name.s == "main" or s.name.s == "[]":
     #  echo renderTree(body)
     #  c.echoCode(result)
     c.prc = oldPrc
   else:
-    c.prc.regInfo.setLen s.offset
-    result = pos
+    c.prc.regInfo.setLen result.usedRegisters
