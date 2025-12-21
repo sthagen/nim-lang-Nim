@@ -110,7 +110,7 @@ proc prepareNode*(cl: var TReplTypeVars, n: PNode): PNode =
     return if tfUnresolved in t.flags: prepareNode(cl, t.n)
            else: t.n
   result = copyNode(n)
-  result.typ() = t
+  result.typ = t
   if result.kind == nkSym:
     result.sym =
       if n.typ != nil and n.typ == n.sym.typ:
@@ -249,13 +249,24 @@ proc hasValuelessStatics(n: PNode): bool =
         a
     proc doThing(_: MyThing)
   ]#
+  result = false
   if n.safeLen == 0 and n.kind != nkEmpty: # Some empty nodes can get in here
-    n.typ == nil or n.typ.kind == tyStatic
+    if n.typ == nil:
+      result = true
+    elif n.typ.kind == tyStatic:
+      result = true
+    elif n.typ.kind == tyTypeDesc:
+      # Check if the base type is an unresolved generic parameter.
+      # This handles cases where a template containing sizeof(T) is called
+      # inside a generic object's when clause - the T needs to be resolved
+      # before we can evaluate the condition.
+      let base = n.typ.skipTypes({tyTypeDesc})
+      if base.kind == tyGenericParam:
+        result = true
   else:
     for x in n:
       if hasValuelessStatics(x):
         return true
-    false
 
 proc replaceTypeVarsN(cl: var TReplTypeVars, n: PNode; start=0; expectedType: PType = nil): PNode =
   if n == nil: return
@@ -264,7 +275,7 @@ proc replaceTypeVarsN(cl: var TReplTypeVars, n: PNode; start=0; expectedType: PT
     if n.typ.kind == tyFromExpr:
       # type of node should not be evaluated as a static value
       n.typ.incl tfNonConstExpr
-    result.typ() = replaceTypeVarsT(cl, n.typ)
+    result.typ = replaceTypeVarsT(cl, n.typ)
     checkMetaInvariants(cl, result.typ)
   case n.kind
   of nkNone..pred(nkSym), succ(nkSym)..nkNilLit:
@@ -706,7 +717,7 @@ proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType, isInstValue = false): 
     if not cl.allowMetaTypes and result.n != nil and
         result.base.kind != tyNone:
       result.n = cl.c.semConstExpr(cl.c, result.n)
-      result.n.typ() = result.base
+      result.n.typ = result.base
 
   of tyGenericInst, tyUserTypeClassInst:
     bailout()

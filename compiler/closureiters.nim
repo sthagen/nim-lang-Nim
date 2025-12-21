@@ -458,7 +458,7 @@ proc newNotCall(g: ModuleGraph; e: PNode): PNode =
 
 proc boolLit(g: ModuleGraph; info: TLineInfo; value: bool): PNode =
   result = newIntLit(g, info, ord value)
-  result.typ() = getSysType(g, info, tyBool)
+  result.typ = getSysType(g, info, tyBool)
 
 proc captureVar(c: var Ctx, s: PSym) =
   if c.varStates.getOrDefault(s.itemId) != localRequiresLifting:
@@ -819,7 +819,7 @@ proc lowerStmtListExprs(ctx: var Ctx, n: PNode, needsSplit: var bool): PNode =
       result = newNodeIT(nkStmtListExpr, n.info, n.typ)
       let (st, ex) = exprToStmtList(n[1])
       n.transitionSonsKind(nkBlockStmt)
-      n.typ() = nil
+      n.typ = nil
       n[1] = st
       result.add(n)
       result.add(ex)
@@ -1307,16 +1307,15 @@ proc countStateOccurences(ctx: var Ctx, n: PNode, stateOccurences: var openArray
 
 proc replaceDeletedStates(ctx: var Ctx, n: PNode): PNode =
   result = n
-  for i in 0 ..< n.safeLen:
-    let c = n[i]
-    if c.kind == nkIntLit:
-      let idx = c.intVal
-      if idx >= 0 and idx < ctx.states.len and ctx.states[idx].label == c and ctx.states[idx].deletable:
-        let gt = ctx.replaceDeletedStates(skipStmtList(ctx.states[idx].body))
-        assert(gt.kind == nkGotoState)
-        n[i] = gt[0]
-    else:
-      n[i] = ctx.replaceDeletedStates(c)
+  if n.kind == nkIntLit:
+    let idx = n.intVal
+    if idx >= 0 and idx < ctx.states.len and ctx.states[idx].label == n and ctx.states[idx].deletable:
+      let gt = ctx.replaceDeletedStates(skipStmtList(ctx.states[idx].body))
+      assert(gt.kind == nkGotoState)
+      result = gt[0]
+  else:
+    for i in 0 ..< n.safeLen:
+      n[i] = ctx.replaceDeletedStates(n[i])
 
 proc replaceInlinedStates(ctx: var Ctx, n: PNode): PNode =
   ## Find all nkGotoState(stateIdx) nodes that do not follow nkYield.
@@ -1347,6 +1346,7 @@ proc optimizeStates(ctx: var Ctx) =
   # Replace deletable state labels to labels of respective non-empty states
   for i in 0 .. ctx.states.high:
     ctx.states[i].body = ctx.replaceDeletedStates(ctx.states[i].body)
+    ctx.states[i].excLandingState = ctx.replaceDeletedStates(ctx.states[i].excLandingState)
 
   # Remove deletable states
   var i = 0

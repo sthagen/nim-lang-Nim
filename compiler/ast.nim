@@ -29,9 +29,6 @@ export astdef
 when not defined(nimKochBootstrap):
   import ast2nif
 
-template typ*(n: PNode): PType =
-  n.typField
-
 when not defined(nimKochBootstrap):
   var program* {.threadvar.}: DecodeContext
 
@@ -48,6 +45,12 @@ template loadType(t: PType) =
   ## Loads a type from NIF file if it's in Partial state.
   when not defined(nimKochBootstrap):
     ast2nif.loadType(program, t)
+
+proc loadSymCallback*(s: PSym) {.nimcall.} =
+  loadSym(s)
+
+proc loadTypeCallback*(t: PType) {.nimcall.} =
+  loadType(t)
 
 proc ensureMutable*(s: PSym) {.inline.} =
   assert s.state != Sealed
@@ -85,9 +88,6 @@ proc setOwner*(s: PType; owner: PSym) {.inline.} =
   if s.state == Partial: loadType(s)
   s.ownerFieldImpl = owner
 
-# Accessor procs for TSym fields
-# Note: kind is kept as a direct field for case statement compatibility
-# but we still provide an accessor that checks state
 proc kind*(s: PSym): TSymKind {.inline.} =
   if s.state == Partial: loadSym(s)
   result = s.kindImpl
@@ -230,7 +230,7 @@ proc offset*(s: PSym): int32 {.inline.} =
   result = s.offsetImpl
 
 proc `offset=`*(s: PSym, val: int32) {.inline.} =
-  assert s.state != Sealed
+  #assert s.state != Sealed
   if s.state == Partial: loadSym(s)
   s.offsetImpl = val
 
@@ -296,7 +296,8 @@ proc incl*(s: PSym; flags: set[TSymFlag]) {.inline.} =
   s.flagsImpl.incl(flags)
 
 proc incl*(s: PSym; flag: TLocFlag) {.inline.} =
-  assert s.state != Sealed
+  #assert s.state != Sealed
+  # locImpl is a backend field so do not protect it against mutations
   if s.state == Partial: loadSym(s)
   s.locImpl.flags.incl(flag)
 
@@ -366,8 +367,7 @@ proc size*(t: PType): BiggestInt {.inline.} =
   result = t.sizeImpl
 
 proc `size=`*(t: PType, val: BiggestInt) {.inline.} =
-  assert t.state != Sealed
-  if t.state == Partial: loadType(t)
+  backendEnsureMutable t
   t.sizeImpl = val
 
 proc align*(t: PType): int16 {.inline.} =
@@ -375,8 +375,7 @@ proc align*(t: PType): int16 {.inline.} =
   result = t.alignImpl
 
 proc `align=`*(t: PType, val: int16) {.inline.} =
-  assert t.state != Sealed
-  if t.state == Partial: loadType(t)
+  backendEnsureMutable t
   t.alignImpl = val
 
 proc paddingAtEnd*(t: PType): int16 {.inline.} =
@@ -384,8 +383,7 @@ proc paddingAtEnd*(t: PType): int16 {.inline.} =
   result = t.paddingAtEndImpl
 
 proc `paddingAtEnd=`*(t: PType, val: int16) {.inline.} =
-  assert t.state != Sealed
-  if t.state == Partial: loadType(t)
+  backendEnsureMutable t
   t.paddingAtEndImpl = val
 
 proc loc*(t: PType): TLoc {.inline.} =
@@ -425,6 +423,14 @@ proc excl*(t: PType; flags: set[TTypeFlag]) {.inline.} =
   assert t.state != Sealed
   if t.state == Partial: loadType(t)
   t.flagsImpl.excl(flags)
+
+proc typ*(n: PNode): PType {.inline.} =
+  result = n.typField
+  if result == nil and nfLazyType in n.flags:
+    result = n.sym.typ
+
+proc `typ=`*(n: PNode, val: sink PType) {.inline.} =
+  n.typField = val
 
 template nodeId(n: PNode): int = cast[int](n)
 
@@ -549,12 +555,19 @@ proc add*(father, son: PType) =
 proc addAllowNil*(father, son: PType) {.inline.} =
   father.sonsImpl.add son
 
-template `[]`*(n: PType, i: int): PType = n.sonsImpl[i]
+template `[]`*(n: PType, i: int): PType =
+  if n.state == Partial: loadType(n)
+  n.sonsImpl[i]
 template `[]=`*(n: PType, i: int; x: PType) =
+  if n.state == Partial: loadType(n)
   n.sonsImpl[i] = x
 
-template `[]`*(n: PType, i: BackwardsIndex): PType = n[n.len - i.int]
-template `[]=`*(n: PType, i: BackwardsIndex; x: PType) = n[n.len - i.int] = x
+template `[]`*(n: PType, i: BackwardsIndex): PType =
+  if n.state == Partial: loadType(n)
+  n[n.len - i.int]
+template `[]=`*(n: PType, i: BackwardsIndex; x: PType) =
+  if n.state == Partial: loadType(n)
+  n[n.len - i.int] = x
 
 proc getDeclPragma*(n: PNode): PNode =
   ## return the `nkPragma` node for declaration `n`, or `nil` if no pragma was found.
@@ -762,7 +775,7 @@ proc withInfo*(n: PNode, info: TLineInfo): PNode =
 proc newSymNode*(sym: PSym): PNode =
   result = newNode(nkSym)
   result.sym = sym
-  result.typ() = sym.typ
+  result.typField = sym.typ
   result.info = sym.info
 
 proc newOpenSym*(n: PNode): PNode {.inline.} =
@@ -791,29 +804,57 @@ proc replaceFirstSon*(n, newson: PNode) {.inline.} =
 proc replaceSon*(n: PNode; i: int; newson: PNode) {.inline.} =
   n.sons[i] = newson
 
-proc last*(n: PType): PType {.inline.} = n.sonsImpl[^1]
+proc last*(n: PType): PType {.inline.} =
+  if n.state == Partial: loadType(n)
+  n.sonsImpl[^1]
 
-proc elementType*(n: PType): PType {.inline.} = n.sonsImpl[^1]
-proc skipModifier*(n: PType): PType {.inline.} = n.sonsImpl[^1]
+proc elementType*(n: PType): PType {.inline.} =
+  if n.state == Partial: loadType(n)
+  n.sonsImpl[^1]
 
-proc indexType*(n: PType): PType {.inline.} = n.sonsImpl[0]
-proc baseClass*(n: PType): PType {.inline.} = n.sonsImpl[0]
+proc skipModifier*(n: PType): PType {.inline.} =
+  if n.state == Partial: loadType(n)
+  n.sonsImpl[^1]
+
+proc indexType*(n: PType): PType {.inline.} =
+  if n.state == Partial: loadType(n)
+  n.sonsImpl[0]
+
+proc baseClass*(n: PType): PType {.inline.} =
+  if n.state == Partial: loadType(n)
+  n.sonsImpl[0]
 
 proc base*(t: PType): PType {.inline.} =
+  if t.state == Partial: loadType(t)
   result = t.sonsImpl[0]
 
-proc returnType*(n: PType): PType {.inline.} = n.sonsImpl[0]
+proc returnType*(n: PType): PType {.inline.} =
+  if n.state == Partial: loadType(n)
+  n.sonsImpl[0]
+
 proc setReturnType*(n, r: PType) {.inline.} =
+  if n.state == Partial: loadType(n)
   n.sonsImpl[0] = r
+
 proc setIndexType*(n, idx: PType) {.inline.} =
+  if n.state == Partial: loadType(n)
   n.sonsImpl[0] = idx
 
-proc firstParamType*(n: PType): PType {.inline.} = n.sonsImpl[1]
-proc firstGenericParam*(n: PType): PType {.inline.} = n.sonsImpl[1]
+proc firstParamType*(n: PType): PType {.inline.} =
+  if n.state == Partial: loadType(n)
+  n.sonsImpl[1]
 
-proc typeBodyImpl*(n: PType): PType {.inline.} = n.sonsImpl[^1]
+proc firstGenericParam*(n: PType): PType {.inline.} =
+  if n.state == Partial: loadType(n)
+  n.sonsImpl[1]
 
-proc genericHead*(n: PType): PType {.inline.} = n.sonsImpl[0]
+proc typeBodyImpl*(n: PType): PType {.inline.} =
+  if n.state == Partial: loadType(n)
+  n.sonsImpl[^1]
+
+proc genericHead*(n: PType): PType {.inline.} =
+  if n.state == Partial: loadType(n)
+  n.sonsImpl[0]
 
 proc skipTypes*(t: PType, kinds: TTypeKinds): PType =
   ## Used throughout the compiler code to test whether a type tree contains or
@@ -844,7 +885,7 @@ proc newIntTypeNode*(intVal: BiggestInt, typ: PType): PNode =
     result = newNode(nkIntLit)
   else: raiseAssert $kind
   result.intVal = intVal
-  result.typ() = typ
+  result.typField = typ
 
 proc newIntTypeNode*(intVal: Int128, typ: PType): PNode =
   # XXX: introduce range check
@@ -853,14 +894,6 @@ proc newIntTypeNode*(intVal: Int128, typ: PType): PNode =
 proc newFloatNode*(kind: TNodeKind, floatVal: BiggestFloat): PNode =
   result = newNode(kind)
   result.floatVal = floatVal
-
-proc newStrNode*(kind: TNodeKind, strVal: string): PNode =
-  result = newNode(kind)
-  result.strVal = strVal
-
-proc newStrNode*(strVal: string; info: TLineInfo): PNode =
-  result = newNodeI(nkStrLit, info)
-  result.strVal = strVal
 
 proc newProcNode*(kind: TNodeKind, info: TLineInfo, body: PNode,
                  params,
@@ -1153,7 +1186,7 @@ proc copyNode*(src: PNode): PNode =
     return nil
   result = newNode(src.kind)
   result.info = src.info
-  result.typ() = src.typ
+  result.typ = src.typ
   result.flags = src.flags * PersistentNodeFlags
   result.comment = src.comment
   when defined(useNodeIds):
@@ -1222,7 +1255,7 @@ template copyNodeImpl(dst, src, processSonsStmt) =
   dst.info = src.info
   when defined(nimsuggest):
     result.endInfo = src.endInfo
-  dst.typ() = src.typ
+  dst.typ = src.typ
   dst.flags = src.flags * PersistentNodeFlags
   dst.comment = src.comment
   when defined(useNodeIds):
