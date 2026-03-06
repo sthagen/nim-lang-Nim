@@ -216,6 +216,8 @@ proc genOptAsgnTuple(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
       flags
   let t = skipTypes(dest.t, abstractInst).getUniqueType()
   for i, t in t.ikids:
+    # Do not produce code for void types
+    if isEmptyType(t): continue
     let field = "Field$1" % [i.rope]
     genAssignment(p, optAsgnLoc(dest, t, field),
                      optAsgnLoc(src, t, field), newflags)
@@ -1587,6 +1589,51 @@ proc genSeqElemAppend(p: BProc, e: PNode, d: var TLoc) =
   genAssignment(p, dest, b, {needToCopy})
   gcUsage(p.config, e)
 
+proc genSeqElemAppendV2(p: BProc, e: PNode, d: var TLoc) =
+  # s.add(x) with optSeqDestructors (arc/orc), inlined for direct slot construction:
+  #   NI oldLen = s.len;
+  #   if (s.p == NIM_NIL || (s.p->cap & ~NIM_STRLIT_FLAG) < oldLen + 1)
+  #     s.p = (PayloadType*)prepareSeqAddUninit(oldLen, s.p, 1, sizeof(T), alignof(T));
+  #   s.len = oldLen + 1;
+  #   s.p->data[oldLen] = x;  // direct assignment, no function call overhead
+  let seqtype = skipTypes(e[1].typ, abstractVarRange)
+  var a = initLocExpr(p, e[1])
+  let pt = getSeqPayloadType(p.module, seqtype)
+  let pe = seqPayloadElem(p.module, seqtype)
+  # Capture a stable pointer to the seq BEFORE evaluating the element (e[2]).
+  # Evaluating e[2] may emit move semantics (eqwasMoved) that nil a variable
+  # through which e[1]'s snippet is accessed (e.g. a closure env pointer).
+  inc(p.labels)
+  let seqPtrName = "T" & rope(p.labels) & "_"
+  p.s(cpsLocals).addVar(kind = Local, name = seqPtrName,
+                        typ = ptrType(getTypeDesc(p.module, seqtype)))
+  p.s(cpsStmts).addAssignment(seqPtrName, cAddr(rdLoc(a)))
+  var b = initLocExpr(p, e[2])
+  # All seq operations now go through the stable seqPtrName pointer.
+  let ra = wrapPar(cDeref(seqPtrName))
+  var tmpL = getIntTemp(p)
+  p.s(cpsStmts).addAssignment(tmpL.snippet, dotField(ra, "len"))
+  let pField = dotField(ra, "p")
+  p.s(cpsStmts).addSingleIfStmt(
+      cOp(Or,
+        cOp(Equal, pField, NimNil),
+        cOp(LessThan,
+          cOp(BitAnd, NimInt, derefField(pField, "cap"), cOp(BitNot, NimInt, NimStrlitFlag)),
+          cOp(Add, NimInt, tmpL.snippet, cIntValue(1))))):
+    p.s(cpsStmts).addFieldAssignmentWithValue(ra, "p"):
+      p.s(cpsStmts).addCast(ptrType(pt)):
+        p.s(cpsStmts).addCall(cgsymValue(p.module, "prepareSeqAddUninit"),
+          tmpL.snippet,
+          pField,
+          cIntValue(1),
+          cSizeof(pe),
+          cAlignof(pe))
+  p.s(cpsStmts).addFieldAssignment(ra, "len",
+    cOp(Add, NimInt, tmpL.snippet, cIntValue(1)))
+  var dest = initLoc(locExpr, e[2], OnHeap)
+  dest.snippet = subscript(dataField(p, ra), tmpL.snippet)
+  genAssignment(p, dest, b, {})
+
 proc genDefault(p: BProc; n: PNode; d: var TLoc) =
   if d.k == locNone: d = getTemp(p, n.typ, needsInit=true)
   else: resetLoc(p, d)
@@ -1722,15 +1769,15 @@ proc genNewSeq(p: BProc, e: PNode) =
     let seqtype = skipTypes(e[1].typ, abstractVarRange)
     let ra = a.rdLoc
     let rb = b.rdLoc
-    let et = getTypeDesc(p.module, seqtype.elementType)
     let pt = getSeqPayloadType(p.module, seqtype)
+    let pe = seqPayloadElem(p.module, seqtype)
     p.s(cpsStmts).addFieldAssignment(ra, "len", rb)
     p.s(cpsStmts).addFieldAssignmentWithValue(ra, "p"):
       p.s(cpsStmts).addCast(ptrType(pt)):
         p.s(cpsStmts).addCall(cgsymValue(p.module, "newSeqPayload"),
           rb,
-          cSizeof(et),
-          cAlignof(et))
+          cSizeof(pe),
+          cAlignof(pe))
   else:
     let lenIsZero = e[2].kind == nkIntLit and e[2].intVal == 0
     genNewSeqAux(p, a, b.rdLoc, lenIsZero)
@@ -1743,15 +1790,15 @@ proc genNewSeqOfCap(p: BProc; e: PNode; d: var TLoc) =
     if d.k == locNone: d = getTemp(p, e.typ, needsInit=false)
     let rd = d.rdLoc
     let ra = a.rdLoc
-    let et = getTypeDesc(p.module, seqtype.elementType)
     let pt = getSeqPayloadType(p.module, seqtype)
+    let pe = seqPayloadElem(p.module, seqtype)
     p.s(cpsStmts).addFieldAssignment(rd, "len", cIntValue(0))
     p.s(cpsStmts).addFieldAssignmentWithValue(rd, "p"):
       p.s(cpsStmts).addCast(ptrType(pt)):
         p.s(cpsStmts).addCall(cgsymValue(p.module, "newSeqPayloadUninit"),
           ra,
-          cSizeof(et),
-          cAlignof(et))
+          cSizeof(pe),
+          cAlignof(pe))
   else:
     if d.k == locNone: d = getTemp(p, e.typ, needsInit=false) # bug #22560
     let ra = a.rdLoc
@@ -1887,15 +1934,15 @@ proc genSeqConstr(p: BProc, n: PNode, d: var TLoc) =
   if optSeqDestructors in p.config.globalOptions:
     let seqtype = n.typ
     let rd = rdLoc dest[]
-    let et = getTypeDesc(p.module, seqtype.elementType)
     let pt = getSeqPayloadType(p.module, seqtype)
+    let pe = seqPayloadElem(p.module, seqtype)
     p.s(cpsStmts).addFieldAssignment(rd, "len", lit)
     p.s(cpsStmts).addFieldAssignmentWithValue(rd, "p"):
       p.s(cpsStmts).addCast(ptrType(pt)):
         p.s(cpsStmts).addCall(cgsymValue(p.module, "newSeqPayload"),
           lit,
-          cSizeof(et),
-          cAlignof(et))
+          cSizeof(pe),
+          cAlignof(pe))
   else:
     # generate call to newSeq before adding the elements per hand:
     genNewSeqAux(p, dest[], lit, n.len == 0)
@@ -1928,15 +1975,15 @@ proc genArrToSeq(p: BProc, n: PNode, d: var TLoc) =
     let seqtype = n.typ
     let rd = rdLoc d
     let valL = cIntValue(L)
-    let et = getTypeDesc(p.module, seqtype.elementType)
     let pt = getSeqPayloadType(p.module, seqtype)
+    let pe = seqPayloadElem(p.module, seqtype)
     p.s(cpsStmts).addFieldAssignment(rd, "len", valL)
     p.s(cpsStmts).addFieldAssignmentWithValue(rd, "p"):
       p.s(cpsStmts).addCast(ptrType(pt)):
         p.s(cpsStmts).addCall(cgsymValue(p.module, "newSeqPayload"),
           valL,
-          cSizeof(et),
-          cAlignof(et))
+          cSizeof(pe),
+          cAlignof(pe))
   else:
     let lit = cIntLiteral(L)
     genNewSeqAux(p, d, lit, L == 0)
@@ -2898,8 +2945,15 @@ proc genMagicExpr(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
   of mAppendStrStr: genStrAppend(p, e, d)
   of mAppendSeqElem:
     if optSeqDestructors in p.config.globalOptions:
-      e[1] = makeAddr(e[1], p.module.idgen)
-      genCall(p, e, d)
+      if p.config.selectedGC in {gcArc, gcAtomicArc, gcOrc}:
+        # Inline growth + direct slot assignment: avoids the add() call overhead
+        # and lets the C compiler see the construction expression at its final
+        # destination, enabling in-place construction for nkObjConstr etc.
+        # gcYrc is excluded because its add() acquires a striped reader lock.
+        genSeqElemAppendV2(p, e, d)
+      else:
+        e[1] = makeAddr(e[1], p.module.idgen)
+        genCall(p, e, d)
     else:
       genSeqElemAppend(p, e, d)
   of mEqStr: genStrEquals(p, e, d)
@@ -3155,6 +3209,8 @@ proc genTupleConstr(p: BProc, n: PNode, d: var TLoc) =
     for i in 0..<n.len:
       var it = n[i]
       if it.kind == nkExprColonExpr: it = it[1]
+      # Do not produce code for void types
+      if it.typ != nil and isEmptyType(it.typ): continue
       rec = initLoc(locExpr, it, dest[].storage)
       rec.snippet = dotField(rdLoc(dest[]), "Field" & rope(i))
       rec.flags.incl(lfEnforceDeref)
@@ -3766,6 +3822,7 @@ proc containsOpaqueImportcField(typ: PType): bool =
       return true
   of tyTuple:
     for i, a in t.ikids:
+      if isEmptyType(a): continue
       if containsOpaqueImportcField(a):
         return true
   of tyArray:
@@ -3815,10 +3872,12 @@ proc getDefaultValue(p: BProc; typ: PType; info: TLineInfo; result: var Builder)
     var tupleInit: StructInitializer
     let initKind = if containsOpaqueImportcField(t): siNamedStruct else: siOrderedStruct
     result.addStructInitializer(tupleInit, kind = initKind):
-      if p.vccAndC and t.isEmptyTupleType:
+      if p.vccAndC and validTupleTypeFields(t) == 0:
         result.addField(tupleInit, name = "dummy"):
           result.addIntValue(0)
       for i, a in t.ikids:
+        # Do not produce code for void types
+        if isEmptyType(a): continue
         let elemTyp = skipTypes(a, abstractRange+{tyOwned}-{tyTypeDesc})
         if not isOpaqueImportcType(elemTyp):
           result.addField(tupleInit, name = "Field" & $i):
@@ -3993,6 +4052,8 @@ proc genConstTuple(p: BProc, n: PNode; isConst: bool; tup: PType; result: var Bu
       var it = n[i]
       if it.kind == nkExprColonExpr:
         it = it[1]
+      # Do not produce code for void types
+      if isEmptyType(tup[i]): continue
       result.addField(tupleInit, name = "Field" & $i):
         genBracedInit(p, it, isConst, tup[i], result)
 
