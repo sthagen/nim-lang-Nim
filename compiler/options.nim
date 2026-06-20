@@ -29,7 +29,7 @@ const
 
   nimEnableCovariance* = defined(nimEnableCovariance)
 
-  icFormatVersion* = "5"
+  icFormatVersion* = "6"
     ## Version of the IC cache format (the sem-NIF module layout written by
     ## ast2nif.nim plus the iface/impl/edges side files). Bump it whenever
     ## that layout changes: `commandIc` wipes a nimcache whose `ic.version`
@@ -49,6 +49,11 @@ const
     ## cdef directives with an always-present extern declaration, so the
     ## per-module merge stage can assign them a single owner; old `.c.nif`
     ## artifacts lack the wrappers.
+    ## v6: `signatureHash`/`hashType` of a builtin type class (`object`, `tuple`,
+    ## `proc`, ...) no longer mixes in the placeholder son's process-local type
+    ## id, so its hash is stable across the NIF boundary (was breaking
+    ## nim-serialization's auto-serialization lookup under IC). The sem-NIF
+    ## macrocache entries and baked generic-instance bodies hold the old hashes.
 
 type                          # please make sure we have under 32 options
                               # (improves code efficiency a lot!)
@@ -200,6 +205,7 @@ type
     cmdCompileToNif
     cmdNifC  # generate C code from NIF files
     cmdIc  # generate .build.nif for nifmake
+    cmdIcConfig # `nim ic`'s precompiled-config producer (writes ic_config.cfg.nif)
 
 const
   cmdBackends* = {cmdCompileToC, cmdCompileToCpp, cmdCompileToOC,
@@ -418,12 +424,16 @@ type
                               # module's package the "main package" and unfilter
                               # foreign-package diagnostics; the real project
                               # restores whole-program filtering semantics.
-    icPreparsedConfig*: string # under `nim m`/`nim nifc`: path of the precompiled
-                              # config artifact written once by the `nim ic` driver.
+    icPreparsedConfig*: string # under the `nim ic` driver and its `nim m`/`nim nifc`
+                              # children: path of the precompiled config artifact.
                               # When set, `loadConfigs` replays the recorded
                               # config-file switches from it instead of re-reading
                               # the `nim.cfg` chain and re-running `config.nims`
-                              # (which the VM makes expensive) per subprocess.
+                              # (which the VM makes expensive) per process. The
+                              # artifact itself is produced by a separate
+                              # `nim icconfig` process (see `cmdIcConfig`).
+    icConfigOut*: string      # under `nim icconfig`: the path to write the
+                              # precompiled config artifact to (set via `--o`).
     icConfigSwitches*: seq[tuple[switch, arg: string]]
                               # the config-file (`passPP`) switches applied while
                               # loading config, in order. Recorded by every nim

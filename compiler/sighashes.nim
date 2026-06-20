@@ -149,6 +149,17 @@ proc hashType(c: var MD5Context, t: PType; flags: set[ConsiderFlag]; conf: Confi
   # as properties are accessed and trigger lazy loading.
   backendEnsureMutable(t)
 
+  # Bare type-class keywords used as a typedesc without arguments (e.g. `array`,
+  # `range`, `distinct` passed to `signatureHash`) have no children, so the
+  # structural branches below would index a non-existent `elementType`. Hash them
+  # by kind (+ sym for an extra, stable distinction) — enough for a stable,
+  # distinct identity. (`seq`/`openArray`/`tuple` already fall through the empty
+  # `else` loop unharmed; this covers the branches that index `elementType`.)
+  if t.kind in {tyArray, tyRange, tyDistinct} and not t.hasElementType:
+    c &= char(t.kind)
+    if t.sym != nil: c.hashSym(t.sym)
+    return
+
   case t.kind
   of tyGenericInvocation:
     for a in t.kids:
@@ -324,6 +335,21 @@ proc hashType(c: var MD5Context, t: PType; flags: set[ConsiderFlag]; conf: Confi
     c &= char(t.kind)
     c.hashType(t.indexType, flags-{CoIgnoreRange}+{CoIgnoreRangeInArray}, conf)
     c.hashType(t.elementType, flags-{CoIgnoreRange}, conf)
+  of tyBuiltInTypeClass:
+    # A builtin type class (`object`, `tuple`, `proc`, `ref`, `seq`, ...) is
+    # identified solely by the *kind* of its single placeholder son plus a few
+    # flags/callConv (see `sameType`). That son is a fresh, field-less, sym-less
+    # type, so the generic `else` below would recurse into it and hash its
+    # process-local `t.id` — unstable across the NIF boundary. nim-serialization
+    # keys auto-serialization on `signatureHash(object)`/`tuple`/... and missed
+    # under IC because the registering and consuming modules minted different
+    # placeholder ids. Hash the class identity that `sameType` actually compares.
+    c &= char(t.kind)
+    let elem = t.elementType
+    c &= char(elem.kind)
+    for f in eqTypeFlags * elem.flags: c &= char(ord(f))
+    if elem.kind == tyProc and tfExplicitCallConv in elem.flags:
+      c &= char(elem.callConv)
   else:
     c &= char(t.kind)
     for a in t.kids: c.hashType(a, flags, conf)
