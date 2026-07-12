@@ -819,7 +819,11 @@ proc genRecordFieldsAux(m: BModule; n: PNode,
         # don't use fieldType here because we need the
         # tyGenericInst for C++ template support
         let noInit = sfNoInit in field.flags or (field.typ.sym != nil and sfNoInit in field.typ.sym.flags)
-        if not noInit and (fieldType.isOrHasImportedCppType() or hasCppCtor(m, field.owner.typ)):
+        # Under `nim ic`, object fields are local NIF syms restored without an
+        # `owner`; `rectype` is the owning record type, so fall back to it rather
+        # than deref a nil `field.owner`.
+        let ownerTyp = if field.owner != nil: field.owner.typ else: rectype
+        if not noInit and (fieldType.isOrHasImportedCppType() or hasCppCtor(m, ownerTyp)):
           var didGenTemp = false
           initializer = genCppInitializer(m, nil, fieldType, didGenTemp)
       result.addField(field, sname, typ, isFlexArray, initializer)
@@ -1807,6 +1811,16 @@ proc generateRttiDestructor(g: ModuleGraph; typ: PType; owner: PSym; kind: TType
 
   incl result.flagsImpl, sfFromGeneric
   incl result.flagsImpl, sfGeneratedOp
+  # Under IC the `rttiDestroy` wrapper is generated independently in every cg
+  # process that emits `typ`'s RTTI (the type-info is emit-everywhere). A plain
+  # counter `disamb` renumbers per process, so the RTTI table baked in module A
+  # references `rttiDestroy_c<n>` while module B (the =destroy owner) defines a
+  # different number → undefined at link. Give it a content-derived `disamb`
+  # (stable across processes) + `HookDisambBit`, exactly like `symPrototype` does
+  # for the hook itself: same `typ` ⇒ same C name everywhere, and the bit makes
+  # `emitsBodyInThisModule` emit the body in every demander (merge dedups). The
+  # `"rttiDestroy"` op-name keeps its key disjoint from the real `=destroy` hook's.
+  setHookDisamb(g, result, "rttiDestroy", typ)
 
 proc genHook(m: BModule; t: PType; info: TLineInfo; op: TTypeAttachedOp; result: var Builder) =
   let theProc = getAttachedOp(m.g.graph, t, op)
@@ -2269,3 +2283,21 @@ proc genTypeSection(m: BModule, n: PNode) =
       discard getTypeDescAux(m, s.typ, intSet, descKindFromSymKind(s.kind))
       if m.g.generatedHeader != nil:
         discard getTypeDescAux(m.g.generatedHeader, s.typ, intSet, descKindFromSymKind(s.kind))
+
+# Unlike genCppInitializer which returns just the braced value list (e.g. "{a, b}"),
+# genCppConstructorExpr returns a full type-prefixed expression (e.g. "Foo(a, b)").
+# This is used when a standalone construction expression is needed — e.g. on the
+# right-hand side of an assignment — whereas genCppInitializer is used in variable
+# declarations where the type is already written separately before the initializer.
+proc genCppConstructorExpr(m: BModule, prc: BProc; typ: PType; didGenTemp: var bool): Snippet =
+  var params = ""
+  if typ.itemId in m.g.graph.initializersPerType:
+    let call = m.g.graph.initializersPerType[typ.itemId]
+    if call != nil:
+      var p = prc
+      if p == nil:
+        p = BProc(module: m)
+      params = genCppParamsForCtor(p, call, didGenTemp)
+      if prc == nil:
+        assert p.blocks.len == 0, "BProc belongs to a struct doesnt have blocks"
+  result = getTypeDesc(m, typ, dkVar) & "(" & params & ")"

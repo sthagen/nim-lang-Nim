@@ -177,6 +177,11 @@ type
 
     procGlobals*: seq[PNode]
     nifReplayActions*: Table[int32, seq[PNode]]  # module position -> replay actions for NIF
+    nifExpansions*: Table[int32, seq[(PSym, TLineInfo)]]
+      # module position -> (template/macro sym, call-site info) for every expansion
+      # in that module. Templates/macros leave no trace in the sem'checked AST, so
+      # this side-channel (written into the `.bif`, see ast2nif) is what lets
+      # `nim track --usages`/`--def` find them. Populated by `rememberExpansion`.
     cachedMods: IntSet
     hookClosure: IntSet # modules whose serialized hooks were already registered
 
@@ -906,6 +911,10 @@ proc needsCompilation*(g: ModuleGraph, fileIdx: FileIndex): bool =
 
 proc getBody*(g: ModuleGraph; s: PSym): PNode {.inline.} =
   result = s.ast[bodyPos]
+  if result != nil and nfLazyBody in result.flags and forceLazyBodyHook != nil:
+    # Sanctioned body-access gate (see astdef.bodyPos): materialize the deferred
+    # IC body so callers may safely touch `.sons` directly, not only via `len`.
+    forceLazyBodyHook(result)
   assert result != nil
 
 when not defined(nimKochBootstrap):

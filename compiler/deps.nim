@@ -15,7 +15,8 @@ import options, msgs, lineinfos, pathutils, condsyms,
   modulepaths, extccomp, cnif, platform
 
 import "../dist/nimony/src/lib" / [nifstreams, bitabs, nifreader, nifbuilder]
-import "../dist/nimony/src/gear2" / modnames
+import icmodnames
+import icnifcore
 
 type
   FilePair = object
@@ -51,24 +52,24 @@ proc parsedFile(c: DepContext; f: FilePair): string =
   getNimcacheDir(c.config).string / f.modname & ".p.nif"
 
 proc semmedFile(c: DepContext; f: FilePair): string =
-  getNimcacheDir(c.config).string / f.modname & ".s.nif"
+  getNimcacheDir(c.config).string / f.modname & ".s.bif"
 
 proc ifaceFile(c: DepContext; f: FilePair): string =
   ## Interface-cookie sidecar written by `nim m` (ast2nif.writeIfaceCookie,
   ## OnlyIfChanged). Dependents' nim_m rules use it as their input instead of
   ## the semmed NIF: a body-only change in a dependency then keeps the sidecar
   ## mtime and nifmake prunes the whole re-sem cascade behind it.
-  getNimcacheDir(c.config).string / f.modname & ".iface.nif"
+  getNimcacheDir(c.config).string / f.modname & ".iface.bif"
 
 proc implFile(c: DepContext; suffix: string): string =
   ## Implementation-cookie sidecar (ast2nif.writeImplCookie): flips on ANY
   ## content change of the module (private bodies included; supersedes the
   ## iface cookie). Used as the edge for dependents that consumed the
   ## module's bodies at compile time (NeedsImpl edges).
-  getNimcacheDir(c.config).string / suffix & ".impl.nif"
+  getNimcacheDir(c.config).string / suffix & ".impl.bif"
 
 proc edgesFile(c: DepContext; f: FilePair): string =
-  getNimcacheDir(c.config).string / f.modname & ".edges.nif"
+  getNimcacheDir(c.config).string / f.modname & ".edges.bif"
 
 proc readNeedsImpl(c: DepContext; f: FilePair): seq[string] =
   ## Reads the module's recorded NeedsImpl edge set (module suffixes whose
@@ -79,19 +80,10 @@ proc readNeedsImpl(c: DepContext; f: FilePair): seq[string] =
   ## gated input of its rule, so the rule re-fires and re-records.
   result = @[]
   if fileExists(c.edgesFile(f)):
-    var s = nifstreams.open(c.edgesFile(f))
-    try:
-      discard processDirectives(s.r)
-      while true:
-        let t = next(s)
-        if t.kind == EofToken: break
-        if t.kind == StringLit:
-          result.add pool.strings[t.litId]
-    finally:
-      close s
+    result = collectBifStrLits(c.edgesFile(f))
 
 proc semDepsFile(c: DepContext; f: FilePair): string =
-  getNimcacheDir(c.config).string / f.modname & ".s.deps.nif"
+  getNimcacheDir(c.config).string / f.modname & ".s.deps.bif"
 
 proc readSemDeps(c: DepContext; f: FilePair): seq[string] =
   ## The module's REAL direct imports (full source paths) as sem resolved them,
@@ -99,16 +91,7 @@ proc readSemDeps(c: DepContext; f: FilePair): seq[string] =
   ## (ast2nif.writeSemDeps). Missing file (not yet semmed) -> empty.
   result = @[]
   if fileExists(c.semDepsFile(f)):
-    var s = nifstreams.open(c.semDepsFile(f))
-    try:
-      discard processDirectives(s.r)
-      while true:
-        let t = next(s)
-        if t.kind == EofToken: break
-        if t.kind == StringLit:
-          result.add pool.strings[t.litId]
-    finally:
-      close s
+    result = collectBifStrLits(c.semDepsFile(f))
 
 proc findNifler(): string =
   # Look for nifler in common locations
@@ -607,6 +590,98 @@ proc readDepsFile(c: var DepContext; pair: FilePair; current: Node) =
           elif t.kind == ParRi: dec depth
     t = next(s)
 
+proc collectIncludeNames(depsPath: string; names: var seq[string]) =
+  ## Lightweight scan of a `.deps.nif` prelude: collect the raw path text of
+  ## every entry inside an `(include ...)` node (idents like `semexprs`, string
+  ## literals like `"system/mmdisp"`, and the leaves of `a/b` path infixes).
+  ## Liberal by design — it also picks up entries under a statically-false
+  ## `(when ...)`; that is harmless for the only caller (`includerSbifs`), whose
+  ## over-collection just costs an extra, result-free bif scan downstream.
+  if not fileExists(depsPath): return
+  var s = nifstreams.open(depsPath)
+  defer: nifstreams.close(s)
+  discard processDirectives(s.r)
+  var depth = 0
+  var includeDepth = 0     # the `depth` at which the current `(include` opened; 0 = not inside one
+  var t = next(s)
+  while t.kind != EofToken:
+    case t.kind
+    of ParLe:
+      inc depth
+      if includeDepth == 0 and pool.tags[t.tagId] == "include":
+        includeDepth = depth
+    of ParRi:
+      if includeDepth != 0 and depth == includeDepth:
+        includeDepth = 0
+      dec depth
+    of Ident, StringLit:
+      if includeDepth != 0:
+        names.add pool.strings[t.litId]
+    else: discard
+    t = next(s)
+
+proc entryStemBase(roots: seq[string]; name: string): (string, string) =
+  ## Resolve include entry `name` to (deps-stem, base-name); ("","") if unfound.
+  for r in roots:
+    let p = r / name.addFileExt("nim")
+    if fileExists(p):
+      return (moduleSuffix(p, []), splitFile(p).name)
+  result = ("", "")
+
+proc includerSbifs*(conf: ConfigRef; targetFile: AbsoluteFile): seq[string] =
+  ## For an include file `targetFile`, return the `.s.bif` paths of every module
+  ## that includes it — directly OR transitively (following the include chain
+  ## `module -> incA -> incB -> targetFile`). `nim track` uses this to avoid
+  ## loading and scanning every module bif: an include file has no bif of its
+  ## own, so its type-checked tokens live in the *including* module's bif. Only
+  ## the small `.deps.nif` preludes are read here, never a `.s.bif`.
+  const depsExt = ".deps.nif"
+  let nc = getNimcacheDir(conf).string
+
+  # Candidate roots for resolving an `(include X)` entry to a real file, so its
+  # module suffix (== its own deps-file stem) can be computed. Include entries
+  # carry any sub-path (`system/mmdisp`), so the file's *directory* roots suffice:
+  # the target's own dir, the project dir, and the search paths cover the
+  # compiler, the stdlib and typical single-tree projects.
+  var roots: seq[string] = @[parentDir(targetFile.string)]
+  if conf.projectPath.string.len > 0: roots.add conf.projectPath.string
+  for sp in conf.searchPaths: roots.add sp.string
+
+  # One pass over every prelude builds the reverse include graph, keyed by base
+  # file name: `includedBy[b]` = deps stems whose owner directly `include`s a
+  # file named `b`. `stemBase` maps an include-only file's deps stem back to its
+  # own base name, so the walk can climb through nested includes.
+  var includedBy = initTable[string, seq[string]]()
+  var stemBase = initTable[string, string]()
+  for depsPath in walkFiles(nc / "*" & depsExt):
+    let base = extractFilename(depsPath)
+    if base.endsWith(".p" & depsExt): continue   # `.p.deps.nif` twin
+    let ownerStem = base[0 ..< base.len - depsExt.len]
+    var names: seq[string] = @[]
+    collectIncludeNames(depsPath, names)
+    for n in names:
+      let (childStem, childBase) = entryStemBase(roots, n)
+      if childBase.len == 0: continue
+      includedBy.mgetOrPut(childBase, @[]).add ownerStem
+      stemBase[childStem] = childBase          # this child's stem -> its base name
+
+  # Walk UP from the target: a deps stem that includes the current base name is
+  # either a module (has a `.s.bif` -> collect it) or itself an include file
+  # (recurse via its own base name).
+  result = @[]
+  var seenBase = initHashSet[string]()
+  var work = @[splitFile(targetFile.string).name]
+  while work.len > 0:
+    let b = work.pop()
+    if seenBase.containsOrIncl(b): continue
+    for stem in includedBy.getOrDefault(b):
+      let sbif = nc / stem & ".s.bif"
+      if fileExists(sbif):
+        if sbif notin result: result.add sbif   # module owner
+      else:
+        let ob = stemBase.getOrDefault(stem)     # include-only owner: climb higher
+        if ob.len > 0: work.add ob
+
 proc traverseDeps(c: var DepContext; pair: FilePair; current: Node) =
   ## Process a module: run nifler and read deps
   if not runNifler(c, pair.nimFile):
@@ -973,7 +1048,12 @@ proc generateBackendBuildFile(c: DepContext; forwardedArgs: seq[string]): string
   result = nimcache / c.nodes[0].files[0].modname & ".backend.build.nif"
 
   let mainNif = c.nodes[0].files[0].nimFile
-  let exeFile = changeFileExt(c.nodes[0].files[0].nimFile, ExeExt)
+  # Honor `--out`/`--outdir`: `cmdIc`'s `setOutFile` populated `conf.outFile`
+  # (the user's `--out`, or the default `<project><exeExt>`), so `absOutFile` is
+  # the final link target — exactly what a whole-program `nim c` would produce.
+  # The `link` child computes its own output from its project name, so the path
+  # is also forwarded to it below.
+  let exeFile = string(c.config.absOutFile)
   let mergeFile = nimcache / MergeDecisionFile
 
   # Per-node output paths.
@@ -981,12 +1061,12 @@ proc generateBackendBuildFile(c: DepContext; forwardedArgs: seq[string]): string
   var cFiles = newSeq[string](c.nodes.len)
   var tFiles = newSeq[string](c.nodes.len)
   # The `lower` stage writes a PROPER module NIF the cg/emit stages load via
-  # `toNifFilename` (a `.s.nif` sibling), so its `.t.nif` lives at the suffix base
+  # `toNifFilename` (a `.s.bif` sibling), so its `.t.bif` lives at the suffix base
   # (mirroring `semmedFile`), not next to the throwaway `.c`.
   for i, node in c.nodes:
     cFiles[i] = backendCFile(c, node)
     cnifFiles[i] = cFiles[i] & ".nif"
-    tFiles[i] = nimcache / node.files[0].modname & ".t.nif"
+    tFiles[i] = nimcache / node.files[0].modname & ".t.bif"
 
   # Only code-generate modules the real program actually reaches; statically
   # over-approximated nodes (e.g. `winlean` on Linux) are sem'd but not emitted.
@@ -1134,6 +1214,11 @@ proc generateBackendBuildFile(c: DepContext; forwardedArgs: seq[string]): string
   b.addIdent "nim_nifc"
   b.withTree "args":
     b.addStrLit "--icBackendStage:link"
+    # The link child is its own `cmdNifC` process whose project is the main
+    # module, so it would default the binary to `<maindir>/<main><exeExt>`.
+    # Forward the resolved target so it writes exactly `exeFile` (`--out`'s
+    # path splits back into outDir+outFile in the child).
+    b.addStrLit "--out:" & exeFile
   for i in 0 ..< c.nodes.len:
     if live[i]: inputStr cFiles[i]
   outputStr exeFile
@@ -1141,8 +1226,12 @@ proc generateBackendBuildFile(c: DepContext; forwardedArgs: seq[string]): string
 
   b.endTree()  # stmts
 
-proc commandIc*(conf: ConfigRef) =
-  ## Main entry point for `nim ic`
+proc commandIc*(conf: ConfigRef; frontendOnly = false) =
+  ## Main entry point for `nim ic`. With `frontendOnly` (used by `nim track` for
+  ## IDE queries) it runs only Phase 1 — the incremental nifler + `nim m`
+  ## frontend that writes every module's `.s.bif` — and skips the whole-program
+  ## backend (`nim nifc` -> C -> link), which a goto-def / find-usages scan does
+  ## not need.
   when not defined(nimKochBootstrap):
     let nifler = findNifler()
     if nifler.len == 0:
@@ -1256,15 +1345,21 @@ proc commandIc*(conf: ConfigRef) =
     let nifmake = findNifmake()
     # Build the per-module rules concurrently: nifmake fans out all commands at
     # each DAG depth via execProcesses (defaults to all cores). Cold builds are
-    # otherwise serial (one child at a time) and leave the machine idle. Opt out
-    # with `-d:icNoParallel` (e.g. for readable, non-interleaved child output
-    # when debugging a build), or cap the concurrency with `-d:icJobs:N` — an
-    # uncapped fan-out across many cores can exhaust RAM on a large project
-    # (each `nim m`/`cg` child holds its own module graph), which nifmake's own
-    # `-j:N` exists to bound.
+    # otherwise serial (one child at a time) and leave the machine idle. An
+    # uncapped fan-out across many cores can exhaust RAM on a large project (each
+    # `nim m`/`cg` child holds its own module graph), which nifmake's own `-j:N`
+    # exists to bound. Concurrency is chosen (highest precedence first):
+    #   * `-d:icNoParallel`      -> serial (readable, non-interleaved child output)
+    #   * `-d:icJobs:N`          -> cap at N (legacy IC-tuning define)
+    #   * `--parallelBuild:N`    -> cap at N (the standard Nim build-parallelism
+    #                               flag; a no-op for `nim c` under IC, so we give
+    #                               it meaning here — lets Nimbus devs pick their
+    #                               own value without a `-d:` define)
+    #   * otherwise              -> uncapped (all cores)
     let parallel =
       if isDefined(conf, "icNoParallel"): ""
       elif isDefined(conf, "icJobs"): " --parallel:" & conf.symbols["icJobs"]
+      elif conf.numberOfProcessors > 0: " --parallel:" & $conf.numberOfProcessors
       else: " --parallel"
 
     # Phase 1 — frontend (nifler + `nim m`), run to a discovery fixpoint.
@@ -1276,10 +1371,12 @@ proc commandIc*(conf: ConfigRef) =
       if nifmake.len == 0:
         rawMessage(conf, hintSuccess, "run:" & " nifmake run" & parallel & " " & buildFile)
         # without nifmake we can only print the manual commands; emit the
-        # backend's too (best effort — discovery cannot run) and stop.
-        let backendFile = generateBackendBuildFile(c, forwardedArgs)
-        rawMessage(conf, hintSuccess, "generated: " & backendFile)
-        rawMessage(conf, hintSuccess, "run:" & " nifmake run" & parallel & " " & backendFile)
+        # backend's too (best effort — discovery cannot run) and stop. An IDE
+        # query (`frontendOnly`) needs no backend, so skip it there.
+        if not frontendOnly:
+          let backendFile = generateBackendBuildFile(c, forwardedArgs)
+          rawMessage(conf, hintSuccess, "generated: " & backendFile)
+          rawMessage(conf, hintSuccess, "run:" & " nifmake run" & parallel & " " & backendFile)
         return
       let cmd = quoteShell(nifmake) & " run" & parallel & " " & quoteShell(buildFile)
       rawMessage(conf, hintExecuting, cmd)
@@ -1323,7 +1420,9 @@ proc commandIc*(conf: ConfigRef) =
     # Phase 2 — backend (whole-program `nim nifc`), run once over the now-final
     # graph. Kept a separate nifmake run so backend rebuilds are decided purely
     # by nifmake's input mtimes, independent of frontend discovery.
-    if frontendOk:
+    # An IDE query (`frontendOnly`) stops after Phase 1: the `.s.bif` it scans
+    # are all produced by the frontend; codegen + link would be wasted work.
+    if frontendOk and not frontendOnly:
       let backendFile = generateBackendBuildFile(c, forwardedArgs)
       rawMessage(conf, hintSuccess, "generated: " & backendFile)
       let cmd = quoteShell(nifmake) & " run" & parallel & " " & quoteShell(backendFile)

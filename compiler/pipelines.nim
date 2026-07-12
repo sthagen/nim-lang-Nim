@@ -313,9 +313,16 @@ proc processPipelineModule*(graph: ModuleGraph; module: PSym; idgen: IdGenerator
       # NIF `deps` section is complete (the backend closure walk needs it), and
       # reused below for the `.s.deps` sidecar (frontend graph re-derivation).
       let resolvedImportDeps = graph.importDeps.getOrDefault(module.position.FileIndex, @[])
+      # The frontend's highest used itemId (max of the sym and type counters):
+      # the backend seeds its id minting ABOVE this so closure envs / RTTI hooks
+      # never share a `toId` with a frontend sym/type. See ast2nif `(unusedid)`.
+      let firstUnusedId = max(idgen.symId, idgen.typeId)
+      var expansions: seq[(PSym, TLineInfo)] = @[]
+      discard graph.nifExpansions.take(module.position.int32, expansions)
       writeNifModule(graph.config, module.position.int32, topLevelStmts, graph.opsLog,
                      replayActions, implDeps, reexportedModuleSyms(graph, module),
-                     genericOffers, typeOffers, resolvedImportDeps)
+                     genericOffers, typeOffers, resolvedImportDeps, firstUnusedId,
+                     expansions)
       # The module's REAL direct imports (incl. macro-generated) for `nim ic`'s
       # graph re-derivation; see ast2nif.writeSemDeps / semdata.addImportFileDep.
       var semDepPaths: seq[string] = @[]
