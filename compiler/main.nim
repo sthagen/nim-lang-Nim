@@ -156,6 +156,17 @@ proc commandCompileToC(graph: ModuleGraph) =
         graph.config.notes = graph.config.mainPackageNotes
         return
 
+  # Spawn a separate nim process for code generation to reclaim memory
+  # before C compilation. The subprocess runs with --compileOnly, generates the
+  # C code and a JSON build script then executes the build script to build the
+  # final output.
+  # optHotCodeReloading is mostly broken in general
+  # optUseNimcache requires changes to how command lines are hashed to avoid rebuild detection errors
+  # optGenStaticLib isn't supported by the JSON build script machinery
+  if {optSpawnCodegen, optCompileOnly, optHotCodeReloading, optUseNimcache, optGenStaticLib} * conf.globalOptions == {optSpawnCodegen}:
+    extccomp.spawnCodegenSubprocess(conf)
+    return # Subprocess handled everything; skip in-process compilation
+
   if not extccomp.ccHasSaneOverflow(conf):
     conf.symbols.defineSymbol("nimEmulateOverflowChecks")
 
@@ -313,6 +324,7 @@ proc mainCommand*(graph: ModuleGraph) =
 
   ## command prepass
   if conf.cmd == cmdCrun: conf.globalOptions.incl {optRun, optUseNimcache}
+  if conf.cmd == cmdBook: conf.globalOptions.incl {optGenIndex}
   if conf.cmd notin cmdBackends + {cmdTcc}: customizeForBackend(backendC)
   if conf.outDir.isEmpty:
     # doc like commands can generate a lot of files (especially with --project)
@@ -321,7 +333,7 @@ proc mainCommand*(graph: ModuleGraph) =
               else: conf.projectPath
     if not ret.string.isAbsolute: # `AbsoluteDir` is not a real guarantee
       rawMessage(conf, errCannotOpenFile, ret.string & "/")
-    if conf.cmd in cmdDocLike + {cmdRst2html, cmdRst2tex, cmdMd2html, cmdMd2tex}:
+    if conf.cmd in cmdDocLike + {cmdRst2html, cmdRst2tex, cmdMd2html, cmdMd2tex, cmdBook}:
       ret = ret / htmldocsDir
     conf.outDir = ret
 
@@ -348,6 +360,14 @@ proc mainCommand*(graph: ModuleGraph) =
       commandDoc2(graph, HtmlExt)
       if optGenIndex in conf.globalOptions and optWholeProject in conf.globalOptions:
         commandBuildIndex(conf, $conf.outDir)
+  of cmdBook:
+    when defined(leanCompiler):
+      conf.quitOrRaise "compiler wasn't built with documentation generator"
+    else:
+      loadConfigs(DocConfig, cache, conf, graph.idgen)
+      conf.setNoteDefaults(warnCannotOpenFile, true)
+      commandBook(cache, conf)
+      commandBuildIndex(conf, $conf.outDir, exclCode = true, inclHeaders = true)
   of cmdRst2html, cmdMd2html:
     # XXX: why are warnings disabled by default for rst2html and rst2tex?
     for warn in rstWarnings:

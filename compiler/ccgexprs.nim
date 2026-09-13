@@ -424,7 +424,15 @@ proc genAssignment(p: BProc, dest, src: TLoc, flags: TAssignmentFlags) =
       simpleAsgn(p.s(cpsStmts), dest, src)
   of tyArray:
     if containsGarbageCollectedRef(dest.t) and p.config.selectedGC notin {gcArc, gcAtomicArc, gcOrc, gcYrc, gcHooks}:
-      genGenericAsgn(p, dest, src, flags)
+      # Static array literals may contain GC-managed values (for example,
+      # strings). They must be copied deeply so that the destination does not
+      # attempt to adjust the reference count of the static literal's
+      # interior pointers. This mirrors the handling for tuples and objects
+      # above, where static sources force a real copy.
+      let newflags =
+        if src.storage == OnStatic: flags + {needToCopy}
+        else: flags
+      genGenericAsgn(p, dest, src, newflags)
     else:
       let rd = rdLoc(dest)
       let rs = rdLoc(src)
@@ -3097,7 +3105,7 @@ proc genMagicExpr(p: BProc, e: PNode, d: var TLoc, op: TMagic) =
       cgsym(p.module, $opr.loc.snippet)
       # make sure we have pointer-initialising code for hot code reloading
       if not wasDeclared and p.hcrOn:
-        let name = mangleDynLibProc(prc)
+        let name = mangleDynLibProc(p.module, prc)
         let rt = getTypeDesc(p.module, prc.loc.t)
         p.module.s[cfsDynLibInit].add('\t')
         p.module.s[cfsDynLibInit].addAssignmentWithValue(name):

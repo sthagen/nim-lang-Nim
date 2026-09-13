@@ -491,6 +491,7 @@ proc parseCommand*(command: string): Command =
   of "e": cmdNimscript
   of "doc0": cmdDoc0
   of "doc2", "doc": cmdDoc
+  of "book": cmdBook
   of "doc2tex": cmdDoc2tex
   of "rst2html": cmdRst2html
   of "md2tex": cmdMd2tex
@@ -528,6 +529,13 @@ proc setCmd*(conf: ConfigRef, cmd: Command) =
     # cmdM requires optCompress for proper IC handling (include files, etc.)
     conf.globalOptions.incl optCompress
   else: discard
+
+  # Enable spawnCodegen by default for C/C++ compilation commands to reclaim
+  # memory before C compilation.
+  # In theory, `optCRun` would benefit from this treatment as well but this gets
+  # complex with its command line hashing
+  if cmd in {cmdCompileToC, cmdCompileToCpp}:
+    conf.globalOptions.incl optSpawnCodegen
 
 proc setCommandEarly*(conf: ConfigRef, command: string) =
   conf.command = command
@@ -832,6 +840,8 @@ proc processSwitch*(switch, arg: string, pass: TCmdLinePass, info: TLineInfo;
     conf.globalOptions.incl optCompress
   of "genbif":
     processOnOffSwitchG(conf, {optGenBif}, arg, pass, info)
+  of "deferbodies":
+    processOnOffSwitchG(conf, {optDeferBodies}, arg, pass, info)
   of "g": # alias for --debugger:native
     conf.globalOptions.incl optCDebug
     conf.options.incl optLineDir
@@ -1126,6 +1136,8 @@ proc processSwitch*(switch, arg: string, pass: TCmdLinePass, info: TLineInfo;
     if switch.normalize == "gendeps": deprecatedAlias(switch, "genscript")
     processOnOffSwitchG(conf, {optGenScript}, arg, pass, info)
     processOnOffSwitchG(conf, {optCompileOnly}, arg, pass, info)
+  of "spawncodegen":
+    processOnOffSwitchG(conf, {optSpawnCodegen}, arg, pass, info)
   of "gencdeps":
     processOnOffSwitchG(conf, {optGenCDeps}, arg, pass, info)
   of "colors": processOnOffSwitchG(conf, {optUseColors}, arg, pass, info)
