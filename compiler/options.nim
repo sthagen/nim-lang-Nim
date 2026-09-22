@@ -403,6 +403,10 @@ type
     foName # lastPathPart, e.g.: foo.nim
     foStacktrace # if optExcessiveStackTrace: foAbs else: foName
 
+  MsgFormat* = enum ## format of the location prefix in compiler messages
+    mfmStd ## standard Nim style: `file(line, col)`
+    mfmGcc ## GCC/Emacs style: `file:line:col:`
+
   ConfigRef* {.acyclic.} = ref object ## every global configuration
                           ## fields marked with '*' are subject to
                           ## the incremental compilation mechanisms
@@ -416,6 +420,7 @@ type
     arcToExpand*: StringTableRef
     m*: MsgConfig
     filenameOption*: FilenameOption # how to render paths in compiler messages
+    msgFormat*: MsgFormat # format of the location prefix in compiler messages
     unitSep*: string
     evalTemplateCounter*: int
     evalMacroCounter*: int
@@ -685,6 +690,7 @@ proc initConfigRefCommon(conf: ConfigRef) =
   conf.options = DefaultOptions
   conf.globalOptions = DefaultGlobalOptions
   conf.filenameOption = foAbs
+  conf.msgFormat = mfmStd
   conf.foreignPackageNotes = foreignPackageNotesDefault
   conf.notes = NotesVerbosity[1]
   conf.mainPackageNotes = NotesVerbosity[1]
@@ -777,7 +783,7 @@ proc isDefined*(conf: ConfigRef; symbol: string): bool =
     of "posix", "unix":
       result = conf.target.targetOS in {osLinux, osMorphos, osSkyos, osIrix, osPalmos,
                             osQnx, osAtari, osAix,
-                            osHaiku, osVxWorks, osSolaris, osNetbsd,
+                            osHaiku, osVxWorks, osSolaris, osIllumos, osNetbsd,
                             osFreebsd, osOpenbsd, osDragonfly, osMacosx, osIos,
                             osAndroid, osNintendoSwitch, osFreeRTOS, osCrossos, osZephyr, osNuttX}
     of "linux":
@@ -794,7 +800,7 @@ proc isDefined*(conf: ConfigRef; symbol: string): bool =
       result = conf.target.targetOS in {osMacos, osMacosx, osIos}
     of "osx", "macosx":
       result = conf.target.targetOS in {osMacosx, osIos}
-    of "sunos": result = conf.target.targetOS == osSolaris
+    of "sunos": result = conf.target.targetOS in {osSolaris, osIllumos}
     of "nintendoswitch":
       result = conf.target.targetOS == osNintendoSwitch
     of "freertos", "lwip":
@@ -810,7 +816,7 @@ proc isDefined*(conf: ConfigRef; symbol: string): bool =
     of "cpu32": result = CPU[conf.target.targetCPU].bit == 32
     of "cpu64": result = CPU[conf.target.targetCPU].bit == 64
     of "nimrawsetjmp":
-      result = conf.target.targetOS in {osSolaris, osNetbsd, osFreebsd, osOpenbsd,
+      result = conf.target.targetOS in {osSolaris, osIllumos, osNetbsd, osFreebsd, osOpenbsd,
                             osDragonfly, osMacosx}
     else: result = false
 

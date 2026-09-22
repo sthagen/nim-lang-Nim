@@ -52,7 +52,10 @@ proc align*(arg: var OffsetAccum; value: int32) =
   if value == szUnknownSize or arg.maxAlign == szUnknownSize or arg.offset == szUnknownSize:
     arg.maxAlign = szUnknownSize
     arg.offset = szUnknownSize
-  else:
+  elif value > 0:
+    # an alignment of 0 means "no alignment requirement": only ``void``
+    # fields have it and they occupy no storage, so they must leave the
+    # offset untouched -- ``align(offset, 0)`` would zero it (#26225)
     arg.maxAlign = max(value, arg.maxAlign)
     arg.offset = align(arg.offset, value)
 
@@ -272,7 +275,10 @@ proc computeSizeAlign(conf: ConfigRef; typ: PType) =
       typ.size = szUnknownSize
       typ.align = szUnknownSize
     else:
-      typ.size = toInt64Checked(len * int32(elemSize), szTooBigSize)
+      # the C backend emits `array[0, T]` as `T[1]` (C has no zero-length
+      # arrays), so reserve one element here as well (bug #26220):
+      let n = if len == Zero: One else: len
+      typ.size = toInt64Checked(n * int32(elemSize), szTooBigSize)
       typ.align = typ.elementType.align
 
   of tyUncheckedArray:
