@@ -19,7 +19,8 @@ import
   mangleutils, cbuilderbase, modulegraphs, icprof
 
 from expanddefaults import caseObjDefaultBranch
-from ast2nif import globalName, toNifFilename, icNifTypeName
+from ast2nif import globalName, toNifFilename, icNifTypeName, loadedReplayActions
+from ic/replayer import localTargetOptions
 from typekeys import modname
 from std/algorithm import sort
 import cnif
@@ -116,6 +117,33 @@ proc findPendingModule(m: BModule, s: PSym): BModule =
     var ms = getModule(s)
     result = m.g.mods[ms.position]
 
+proc icTargetPush(m: BModule; prc: PSym): bool =
+  ## A definition owned by a module with `{.localPassC: "-mavx2".}` can land in
+  ## another module's TU (a generic instance instantiated there, or an
+  ## emit-everywhere copy). That TU is not compiled with the owner's flags, so
+  ## compile the definition itself for the owner's target instead.
+  let owner = getModule(prc)
+  if owner == nil or owner.position == m.module.position: return false
+  if not m.g.icTargets.hasKey(owner.position):
+    m.g.icTargets[owner.position] =
+      localTargetOptions(loadedReplayActions(FileIndex owner.position))
+  let t = m.g.icTargets[owner.position]
+  if t.len == 0: return false
+  case m.config.cCompiler
+  of ccGcc:
+    m.s[cfsProcs].add("#pragma GCC push_options\n#pragma GCC target(\"" & t & "\")\n")
+  of ccCLang:
+    m.s[cfsProcs].add("#pragma clang attribute push (__attribute__((target(\"" &
+      t & "\"))), apply_to = function)\n")
+  else: return false
+  result = true
+
+proc icTargetPop(m: BModule) =
+  case m.config.cCompiler
+  of ccGcc: m.s[cfsProcs].add("#pragma GCC pop_options\n")
+  of ccCLang: m.s[cfsProcs].add("#pragma clang attribute pop\n")
+  else: discard
+
 proc icNifName(m: BModule; s: PSym): string =
   ## The serialized NIF name of `s`, recorded next to its C name in the cnif
   ## artifact so a later run can re-demand the definition when a reused TU
@@ -169,12 +197,28 @@ proc signatureHasMetaType*(t: PType; depth: int = 0): bool =
   for k in t.kids:
     if signatureHasMetaType(k, depth + 1): return true
 
-proc ownsRuntimeRoutine*(s: PSym; modPos: int): bool =
-  ## A concrete, non-generic, runtime routine with a real body, OWNED by the
-  ## module at `modPos`. Shared by the `cg` stage's owned-routine seeding (so a
-  ## routine called only from other modules is still emitted by somebody) and
-  ## the `lower` stage's owned-routine enumeration, so both stages see exactly
-  ## the same set. The exclusions:
+proc seedsOnlyExportcRoutines*(conf: ConfigRef): bool =
+  ## Standalone builds without a GC leave parts of the runtime out. A routine
+  ## that sem marked used (because some unreachable routine refers to it) can
+  ## then need a compilerproc this configuration does not have ("system module
+  ## needs: appendString"). Classic codegen only generates reachable routines
+  ## and never notices, so the per-module backend seeds only the `{.exportc.}`
+  ## entry points there and leaves everything else to demand.
+  conf.target.targetOS == osStandalone and conf.selectedGC == gcNone
+
+proc ownsRuntimeRoutine*(s: PSym; modPos: int; exportcOnly = false): bool =
+  ## A used or exported, concrete, non-generic runtime routine with a body,
+  ## OWNED by the module at `modPos`. Shared by the `cg` stage's owned-routine
+  ## seeding (so a routine called only from other modules is still emitted by
+  ## its owner, next to the owner's emits and C options) and the `lower` stage's
+  ## owned-routine enumeration, so both stages see exactly the same set. An
+  ## unused private routine is left alone: classic codegen never visits it, and
+  ## transforming it can reject a valid program (for example, an unused helper
+  ## that captures its owner's `result`). Exported routines are kept even when
+  ## the module does not use them itself, because a use by an importer is only
+  ## recorded in the importer's process, never in this module's NIF. With
+  ## `exportcOnly` (see `seedsOnlyExportcRoutines`) only `{.exportc.}` routines
+  ## qualify. The other exclusions:
   ## - nested/closure procs (owner is a proc, not a module): emitted via their
   ##   enclosing routine's lambda-lifting, never standalone;
   ## - generic instances (`sfFromGeneric`): emitted by demand, deduped by merge;
@@ -207,6 +251,8 @@ proc ownsRuntimeRoutine*(s: PSym; modPos: int): bool =
   s.magic == mNone and
   sfFromGeneric notin s.flags and
   sfDispatcher notin s.flags and
+  (if exportcOnly: {sfExportc, sfCompilerProc} * s.flags == {sfExportc}
+   else: {sfUsed, sfExported} * s.flags != {}) and
   {sfForward, sfImportc, sfCompileTime, sfError} * s.flags == {} and
   s.typ != nil and not signatureHasMetaType(s.typ) and
   s.ast != nil and s.ast.safeLen > bodyPos and
@@ -221,7 +267,7 @@ proc ownsRuntimeRoutine*(s: PSym; modPos: int): bool =
   # `nkEmpty`, but `state_transition_epoch` still calls it. Forward declarations
   # (the other empty-body case) carry `sfForward` and are excluded above.
 
-proc bodyIsSeededByItsOwner(prc: PSym): bool =
+proc bodyIsSeededByItsOwner(m: BModule; prc: PSym): bool =
   ## Whether SOME module's `cg` is guaranteed to emit `prc`'s body on its own,
   ## without this TU asking for it. There are exactly two seeders in the
   ## per-module backend, and this enumerates them:
@@ -250,7 +296,8 @@ proc bodyIsSeededByItsOwner(prc: PSym): bool =
   ## be routed through the ownership question at all.
   if isBackendMinted(prc.itemId): return false
   result = sfDispatcher in prc.flags or
-           ownsRuntimeRoutine(prc, prc.itemId.module)
+           ownsRuntimeRoutine(prc, prc.itemId.module,
+                              exportcOnly = seedsOnlyExportcRoutines(m.config))
 
 proc emitsBodyInThisModule(m: BModule, prc: PSym): bool =
   ## Whether the translation unit `m` emits `prc`'s BODY, as opposed to only a
@@ -274,7 +321,7 @@ proc emitsBodyInThisModule(m: BModule, prc: PSym): bool =
   ## who DECLARED, and the two drifted apart for every symbol the backend mints.
   if not (m.config.cmd == cmdNifC and m.config.icBackendStage == "cg"):
     return true
-  if not bodyIsSeededByItsOwner(prc):
+  if not bodyIsSeededByItsOwner(m, prc):
     # Seeded by nobody: every demander emits it, merge keeps one.
     result = true
   elif sfDispatcher in prc.flags:
@@ -1653,6 +1700,28 @@ proc genProcBody(p: BProc; procBody: PNode) =
     p.blocks[0].sections[cpsInit].addAssignmentWithValue("nimErr_"):
       p.blocks[0].sections[cpsInit].addCall(cgsymValue(p.module, "nimErrorFlag"))
 
+proc resultDestructorCpp(p: BProc; prc: PSym; res: PSym; procBody: PNode): PNode =
+  ## bug #25919: with C++ exceptions a result returned by value is lost when
+  ## the proc raises. Returns the `=destroy(result)` call to run before the
+  ## exception is rethrown, or nil when no cleanup is required.
+  result = nil
+  if p.config.exc == excCpp and sfInjectDestructors in prc.flags and
+      p.config.selectedGC in {gcArc, gcAtomicArc, gcOrc, gcYrc}:
+    let t = res.typ.skipTypes({tyGenericInst, tyAlias, tySink})
+    var op = getAttachedOp(p.module.g.graph, t, attachedDestructor)
+    if op != nil and op.ast.isGenericRoutine:
+      # like `injectdestructors.genOp`: use the canonical type's instance
+      let h = hashType(t, p.config, {CoType, CoConsiderOwned, CoDistinct})
+      let canon = p.module.g.graph.canonTypes.getOrDefault(h)
+      op = if canon != nil: getAttachedOp(p.module.g.graph, canon, attachedDestructor) else: nil
+    if op != nil and not op.ast.isGenericRoutine and
+        not isTrivialProc(p.module.g.graph, op) and
+        bodyCanRaise(p, procBody):
+      var arg = newSymNode(res)
+      if op.typ.signatureLen <= 1 or op.typ.firstParamType.kind == tyVar:
+        arg = newTreeIT(nkHiddenAddr, res.info, makePtrType(res.typ, p.module.idgen), arg)
+      result = newTreeI(nkCall, res.info, newSymNode(op), arg)
+
 proc genProcLvl3*(m: BModule, prc: PSym) =
   if m.config.cmd == cmdNifC:
     fillBackendName(m, prc)
@@ -1674,14 +1743,22 @@ proc genProcLvl3*(m: BModule, prc: PSym) =
       return
     if prc.itemId.module != m.module.position and
         not isBackendMinted(prc.itemId) and
-        (prc.typ == nil or prc.typ.callConv != ccInline) and
         sfDispatcher notin prc.flags:
       # this TU embeds a definition whose body lives in another module's
-      # NIF: record the impl dependency (the artifact's cdeps head) so the
-      # reuse gate re-checks that module's impl cookie. Inline bodies are
-      # already part of the iface cookie; dispatcher bodies are synthesized
-      # from the whole program and live in main, which never reuses.
+      # NIF (an inline proc, a shared instance, an emit-everywhere copy):
+      # record it (the artifact's cdeps head, and the `cg` rule's inputs via
+      # `nifbackend.writeBodyDeps`) so an edit of that body regenerates this
+      # TU. Dispatcher bodies are synthesized from the whole program and live
+      # in main, which is never reused.
       m.icImplMods.incl prc.itemId.module
+    if sfFromGeneric in prc.flags and not isBackendMinted(prc.itemId):
+      # A generic instance belongs to the module that requested it, but its
+      # body comes from the module defining the generic: record that one too
+      # (its module-level emits are replayed here, see
+      # `nifbackend.replayForeignTopLevelEmits`).
+      let src = getModule(prc)
+      if src != nil and src.position != m.module.position:
+        m.icImplMods.incl src.position
   var p = newProc(prc, m)
   var header = newBuilder("")
   let isCppMember = m.config.backend == backendCpp and sfCppMember * prc.flags != {}
@@ -1718,6 +1795,8 @@ proc genProcLvl3*(m: BModule, prc: PSym) =
   let tmpInfo = prc.info
   discard freshLineInfo(p, prc.info)
 
+  # `=destroy(result)` to run when the body raises, see `resultDestructorCpp`:
+  var resultCleanup: PNode = nil
   if sfPure notin prc.flags and prc.typ.returnType != nil:
     if resultPos >= prc.ast.len:
       internalError(m.config, prc.info, "proc has no result symbol")
@@ -1733,9 +1812,10 @@ proc genProcLvl3*(m: BModule, prc: PSym) =
         # declare the result symbol:
         assignLocalVar(p, resNode)
         assert(res.loc.snippet != "")
+        resultCleanup = resultDestructorCpp(p, prc, res, procBody)
         let paths = allPathsAsgnResult(p, procBody)
         if p.config.selectedGC in {gcArc, gcAtomicArc, gcOrc, gcYrc} and
-            paths == InitSkippable:
+            paths == InitSkippable and resultCleanup == nil:
           # In an ideal world the codegen could rely on injectdestructors doing its job properly
           # and then the analysis step would not be required.
           discard "result init optimized out"
@@ -1794,6 +1874,12 @@ proc genProcLvl3*(m: BModule, prc: PSym) =
   closureSetup(p, prc)
   icProfStart(tGenBody)
   genProcBody(p, procBody)
+  if resultCleanup != nil:
+    p.s(cpsStmts).buf = "try {\n" & move(p.s(cpsStmts).buf)
+    p.s(cpsStmts).add("} catch (...) {\n")
+    genRestoreFrameAfterException(p)
+    genStmts(p, resultCleanup)
+    p.s(cpsStmts).add("throw;\n}\n")
   icProfStop(tGenBody)
 
   # IC: spurious write, seems fine for now:
@@ -1876,7 +1962,9 @@ proc genProcLvl3*(m: BModule, prc: PSym) =
       if sfCppMember * prc.flags != {}: icNifName(m, prc)
       else: stripCnifMarks(prc.loc.snippet)
     m.s[cfsProcs].add(cnifDefDirective(defName, defFlags, icNifName(m, prc)))
+    let pushed = icTargetPush(m, prc)
     m.s[cfsProcs].add(extract(generatedProc))
+    if pushed: icTargetPop(m)
     m.s[cfsProcs].add(cnifEndDefs())
   else:
     m.s[cfsProcs].add(extract(generatedProc))
@@ -2864,6 +2952,10 @@ proc genModule(m: BModule, cfile: Cfile): Rope =
     res.add(extract(m.s[cfsFrameDefines]))
 
   for i in cfsForwardTypes..cfsProcs:
+    if i == cfsProcs and m.config.cmd == cmdNifC and not m.hasTopLevelEmit:
+      # where the declarations end: see `cnif.renderCPartsFromArtifact`. A
+      # module without the marker is never split, which user C text needs.
+      res.add(cnifProcsSection())
     if m.s[i].buf.len > 0:
       moduleIsEmpty = false
       res.add(extract(m.s[i]))

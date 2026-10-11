@@ -216,6 +216,9 @@ type
     lastTLineInfo*: TLineInfo
     sideEffects*: Table[int, seq[(TLineInfo, PSym)]] # symbol.id index
     inUncheckedAssignSection*: int
+    inUncheckedAccess*: int   # inside `{.cast(uncheckedAccess).}`: the fields
+                              # of a sum type are accessible outside of a
+                              # pattern matching `case`
     importModuleLookup*: Table[int, seq[int]] # (module.ident.id, [module.id])
     forwardTypeUpdates*: seq[(PSym, PType, PNode)]
       # top-level owner, type, and type node for delayed retries inside a
@@ -260,6 +263,13 @@ type
     prevDemandRoutineBody*: proc (prc: PSym) {.closure.}
       # the enclosing module's hook, restored by `closePContext`: an import is
       # compiled from inside the importer's pass, so these nest.
+    deferAllBodies*: bool
+      # the declaration phase of a cycle group (`import m {.cyclic.}`): routine
+      # bodies are deferred like under `--deferBodies:on`, so that they can
+      # refer to declarations of the other modules of the group.
+    cyclePartners*: seq[PContext]
+      # the other modules of this module's cycle group; their deferred bodies
+      # are drained before a statement that could observe them.
 
   TBorrowState* = enum
     bsNone, bsReturnNotMatch, bsNoDistinct, bsGeneric, bsNotSupported, bsMatch
@@ -531,6 +541,11 @@ proc makeTypeWithModifier*(c: PContext,
   else:
     result = newTypeS(modifier, c, skipIntLit(baseType, c.idgen))
 
+proc ownedRefsEnabled*(c: PContext): bool {.inline.} =
+  ## `owned` is a real type constructor (rather than erased) under the old
+  ## `--newruntime` switch or `--experimental:ownedRefs`.
+  result = optOwnedRefs in c.config.globalOptions or ownedRefs in c.features
+
 proc makeVarType*(c: PContext, baseType: PType; kind = tyVar): PType =
   if baseType.kind == kind:
     result = baseType
@@ -732,12 +747,12 @@ proc sealRodFile*(c: PContext) =
     c.idgen.sealed = true # no further additions are allowed
 
 proc rememberExpansion*(c: PContext; info: TLineInfo; expandedSym: PSym) =
-  ## Templates and macros are very special in Nim; these have
-  ## inlining semantics so after semantic checking they leave no trace
-  ## in the sem'checked AST. This is very bad for IDE-like tooling
-  ## ("find all usages of this template" would not work). We need special
-  ## logic to remember macro/template expansions. This is done here and
-  ## delegated to the "NIF" file mechanism.
+  ## Templates and macros are inlined and leave no trace in the
+  ## sem'checked AST, and generic procs do not leave enough information
+  ## referencing the generic definition for tools to use for definitions
+  ## and usages, since they are instantiated by the compiler.
+  ## This is pecial logic that helps remember macro/template/generic proc
+  ## expansions, saving the data for the "NIF" file mechanism to handle.
   ##
   ## We only bother when a NIF file is actually going to be written (IC / `nim m`,
   ## `--compress`, semantic BIF output, or a running suggestion engine); a plain

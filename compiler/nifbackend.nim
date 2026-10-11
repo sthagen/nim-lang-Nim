@@ -17,14 +17,14 @@
 ##   1. Compile modules to NIF: nim m mymodule.nim
 ##   2. Generate C from NIF: nim nifc myproject.nim
 
-import std/[intsets, tables, sets, os, algorithm, syncio, times, strutils]
+import std/[intsets, tables, sets, os, algorithm, syncio, times, strutils, hashes, strtabs]
 
 when defined(nimPreviewSlimSystem):
   import std/assertions
 
-import ast, options, lineinfos, modulegraphs, cgendata, cgen,
+import ast, options, lineinfos, modulegraphs, cgendata, cgen, trees, wordrecg,
   pathutils, extccomp, msgs, modulepaths, idents, types, ast2nif, typekeys,
-  cnif, icmodnames
+  cnif, icmodnames, ropes
 from cgmeth import generateIfMethodDispatchers
 from transf import transformBody
 from injectdestructors import injectDestructorCalls
@@ -69,10 +69,20 @@ proc loadModuleDependencies(g: ModuleGraph; mainFileIdx: FileIndex;
 
   if mainModule.module != nil:
     incl mainModule.module.flagsImpl, sfMainModule
+    # Every other process names the main module by its NIF suffix, as it does
+    # with all modules it loads. Use that name here too: in an import cycle
+    # other modules refer to the main module's routines.
+    g.ifaces[mainFileIdx.int].uniqueName = rope(uniqueModuleName(g.config, mainModule.module,
+      AbsoluteFile cachedModuleSuffix(g.config, mainFileIdx)))
     for dep in mainModule.deps:
       stack.add dep
 
   var visited = initHashSet[string]()
+  # In an import cycle a dependency lists the main module among its deps. It is
+  # loaded above already, with its full AST as the codegen target, and must not
+  # be loaded a second time, interface-only: `findTargetModule` would then pick
+  # that copy and the program would lose all of its module init code.
+  visited.incl cachedModuleSuffix(g.config, mainFileIdx)
 
   while stack.len > 0:
     let suffix = stack.pop()
@@ -159,8 +169,9 @@ proc generateCodeForModule(g: ModuleGraph; precomp: PrecompiledModule) =
   # The merge stage's DCE drops whatever turns out globally dead.
   if g.config.cmd == cmdNifC and g.config.icBackendStage == "cg":
     let modPos = precomp.module.position
+    let exportcOnly = seedsOnlyExportcRoutines(g.config)
     for s in moduleSymbolStubs(ast.program, FileIndex modPos):
-      if ownsRuntimeRoutine(s, modPos):
+      if ownsRuntimeRoutine(s, modPos, exportcOnly):
         requestProcDef(bmod, s)
 
 proc loadBackendModules(g: ModuleGraph; mainFileIdx: FileIndex):
@@ -393,6 +404,27 @@ proc reownFromTwin(n: PNode; twin, s: PSym) =
 proc lowerOneModule(g: ModuleGraph; target: PrecompiledModule;
                     seenNested: var IntSet)
 
+proc writeBodyDeps(g: ModuleGraph; targets: openArray[PrecompiledModule];
+                   mods: IntSet; outfile: string) =
+  ## The `.bodydeps` sidecar next to a stage output: the suffixes of the modules
+  ## (other than this batch's members) whose routine BODIES the stage read — an
+  ## inlined iterator, an embedded inline proc or foreign definition. deps.nim
+  ## lists their NIFs as inputs of the stage's rule on the next run, so an edit
+  ## of such a body re-runs the stage although this module's own NIF did not
+  ## change (a body edit changes no importer's interface). Always written: it is
+  ## a declared output of the rule.
+  var own = initIntSet()
+  for t in targets:
+    if t.module != nil: own.incl t.module.position
+  var lines: seq[string] = @[]
+  for pos in mods.items:
+    if pos >= 0 and pos < g.config.m.fileInfos.len and pos notin own:
+      lines.add cachedModuleSuffix(g.config, FileIndex pos)
+  sort lines
+  var content = ""
+  for l in lines: content.add l & "\n"
+  writeFile(outfile, content)
+
 proc generateLowerStage(g: ModuleGraph; mainFileIdx: FileIndex) =
   ## Backend lowering for this invocation's batch
   ## (`--icBackendStage:lower --icBackendModules:<a,b,c>`):
@@ -436,6 +468,12 @@ proc generateLowerStage(g: ModuleGraph; mainFileIdx: FileIndex) =
   var seenNested = initIntSet()
   for target in targets:
     lowerOneModule(g, target, seenNested)
+  for target in targets:
+    if target.module != nil:
+      writeBodyDeps(g, targets, g.icBodyDeps,
+        getNimcacheDir(g.config).string /
+          cachedModuleSuffix(g.config, FileIndex target.module.position) &
+          ".t.bif" & BodyDepsExt)
 
 proc lowerOneModule(g: ModuleGraph; target: PrecompiledModule;
                     seenNested: var IntSet) =
@@ -566,6 +604,8 @@ proc cgGenerateModule(g: ModuleGraph; target: PrecompiledModule)
 proc cgFinishModule(g: ModuleGraph; target: PrecompiledModule;
                     modules: seq[PrecompiledModule];
                     precompSys: PrecompiledModule)
+proc replayForeignTopLevelEmits(g: ModuleGraph; target: PrecompiledModule;
+    modules: seq[PrecompiledModule]; precompSys: PrecompiledModule)
 
 proc generateCgStage(g: ModuleGraph; mainFileIdx: FileIndex) =
   ## Backend codegen for this invocation's batch
@@ -640,6 +680,8 @@ proc generateCgStage(g: ModuleGraph; mainFileIdx: FileIndex) =
   timed tCgFinish:
     for target in targets:
       cgFinishModule(g, target, modules, precompSys)
+  for target in targets:
+    replayForeignTopLevelEmits(g, target, modules, precompSys)
   icProfMem(mAfterFinish)
 
   # Writes each batch member's `.c.nif` (every other loaded module's TU is empty,
@@ -677,6 +719,67 @@ proc cgGenerateModule(g: ModuleGraph; target: PrecompiledModule) =
     let tbm = bl.mods[target.module.position]
     if tbm != nil:
       tbm.icGlobalDtorName = genIcModuleDestroyGlobals(g, tbm)
+
+proc isPreprocessorOnly(code: string): bool =
+  ## True if every line of `code` is a preprocessor directive (or blank, or the
+  ## continuation of a directive ending in `\`).
+  result = false
+  var continued = false
+  for line in code.splitLines:
+    let l = line.strip
+    if l.len == 0: continue
+    if not continued and l[0] != '#': return false
+    continued = l[^1] == '\\'
+    result = true
+
+proc isReplicableTopLevelEmit(n: PNode): bool =
+  ## A routine body can be emitted into another module's TU: a generic instance,
+  ## or a routine its owner did not emit itself. Such a body may rely on the
+  ## owner's module-level emits, so those are replayed into that TU as well,
+  ## but only the ones that are safe to repeat in another TU: emits marked
+  ## `/*INCLUDESECTION*/` or `/*TYPESECTION*/`, and unmarked emits consisting
+  ## only of preprocessor directives (`#include`, `#define`). Anything else may
+  ## define C functions or storage and stays in the owner's TU alone.
+  if n.kind notin nkPragmaCallKinds or n.len != 2 or whichPragma(n) != wEmit:
+    return false
+  var arg = n[1]
+  if arg.kind in {nkArgList, nkBracket} and arg.len == 1:
+    arg = arg[0]
+  if arg.kind notin nkStrLit..nkTripleStrLit: return false
+  let code = arg.strVal
+  result = code.startsWith("/*INCLUDESECTION*/") or
+    code.startsWith("/*TYPESECTION*/") or isPreprocessorOnly(code)
+
+proc replayForeignTopLevelEmits(g: ModuleGraph; target: PrecompiledModule;
+    modules: seq[PrecompiledModule]; precompSys: PrecompiledModule) =
+  ## `icImplMods` records the modules whose routine bodies were emitted into
+  ## this TU; replay their replicable module-level emits (see
+  ## `isReplicableTopLevelEmit`). Modules other than the target are loaded
+  ## interface-only, so load such a module's top-level statements on demand.
+  let bl = BModuleList(g.backend)
+  let bmod = bl.mods[target.module.position]
+  if bmod == nil or bmod.icImplMods.len == 0: return
+
+  for ownerPos in bmod.icImplMods.items:
+    var owner = PrecompiledModule(module: nil)
+    if precompSys.module != nil and precompSys.module.position == ownerPos:
+      owner = precompSys
+    else:
+      for candidate in modules:
+        if candidate.module != nil and candidate.module.position == ownerPos:
+          owner = candidate
+          break
+    if owner.module == nil or owner.topLevel == nil: continue
+    if owner.topLevel.len == 0:
+      owner = moduleFromNifFile(g, FileIndex ownerPos, {LoadFullAst})
+    for stmt in owner.topLevel:
+      if stmt.kind != nkPragma: continue
+      var selected = newNodeI(nkPragma, stmt.info)
+      for pragma in stmt:
+        if isReplicableTopLevelEmit(pragma):
+          selected.add copyTree(pragma)
+      if selected.len > 0:
+        cgen.genTopLevelStmt(bmod, selected)
 
 proc cgFinishModule(g: ModuleGraph; target: PrecompiledModule;
                     modules: seq[PrecompiledModule];
@@ -762,8 +865,10 @@ proc cgFinishModule(g: ModuleGraph; target: PrecompiledModule;
     # Record this module's C compile/link directives next to its `.c` so the
     # `link` stage can recover them without loading the module graph. See
     # `replayer.writeBackendActions`.
-    writeBackendActions(g, target.module, target.topLevel,
-                        getCFile(tb).string & BackendActionsExt)
+    writeBackendActions(g, target.module, target.topLevel, getCFile(tb).string)
+    var mods = g.icBodyDeps
+    for pos in tb.icImplMods.items: mods.incl pos
+    writeBodyDeps(g, [target], mods, getCFile(tb).string & BodyDepsExt)
 
 proc generateMergeStage(g: ModuleGraph) =
   ## Per-module backend merge (`--icBackendStage:merge`): a pure artifact
@@ -802,6 +907,37 @@ proc generateMergeStage(g: ModuleGraph) =
 
 proc emitOneModule(g: ModuleGraph; mainFileIdx: FileIndex; member: string;
                    isMain: bool; decision: MergeDecision)
+
+proc addCFileWithParts(g: ModuleGraph; cpath, nimname: string) =
+  ## Hands a module's `.c` to the C compiler, and the extra C files `emit`
+  ## split it into, as listed by its `CPartsExt` manifest.
+  var files = @[cpath]
+  let manifest = cpath & CPartsExt
+  if fileExists(manifest):
+    for line in lines(manifest):
+      let sp = line.rfind(' ')
+      if sp > 0: files.add line[0 ..< sp]
+  for f in files:
+    let cfile = AbsoluteFile f
+    var cf = Cfile(nimname: nimname, cname: cfile,
+                   obj: completeCfilePath(g.config, toObjFile(g.config, cfile)),
+                   flags: {})
+    addExternalFileToCompile(g.config, cf)
+
+proc cPartBytes(conf: ConfigRef): int =
+  ## Target size of the proc bodies per C file when `emit` splits a big module;
+  ## 0 disables splitting. `-d:icCPartBytes:N` overrides. Measured on a cold
+  ## `-d:release` IC build of the compiler, 32 cores: unsplit 35.9s, 1 MB parts
+  ## 30.6s (2 modules split), 500 KB 27.9s, 300 KB 25.1s (18 modules, 70 extra
+  ## files), 200 KB 25.0s.
+  result = 300_000
+  if isDefined(conf, "icCPartBytes"):
+    try: result = parseInt(conf.symbols["icCPartBytes"])
+    except ValueError: discard
+  if conf.cppCustomNamespace.len > 0:
+    # the namespace opened in the declarations closes after the init procs,
+    # which only the first file has
+    result = 0
 
 proc generateEmitStage(g: ModuleGraph; mainFileIdx: FileIndex) =
   ## Backend emit for this invocation's batch
@@ -858,7 +994,9 @@ proc emitOneModule(g: ModuleGraph; mainFileIdx: FileIndex; member: string;
       "per-module emit: missing .c.nif artifact for suffix: " & member)
     return
   var dropped = 0
-  let code = renderCFromArtifact(artifact, decision, extractFilename(artifact), dropped)
+  let parts = renderCPartsFromArtifact(artifact, decision, extractFilename(artifact),
+                                       dropped, cPartBytes(g.config))
+  let code = parts[0]
   # Write the `.c` content-stably. `merge` re-runs on any edit and bumps the
   # decision file's mtime, so nifmake re-fires every `emit` (the filter is cheap);
   # but the FILTERED output is usually byte-identical for modules unaffected by
@@ -879,6 +1017,26 @@ proc emitOneModule(g: ModuleGraph; mainFileIdx: FileIndex; member: string;
   # The stamp is written unconditionally and is the rule's freshness proof; the
   # `.c` keeps its content-stable mtime so `callCCompiler` still reuses the `.o`.
   writeFile(cfile & ".stamp", $code.len & " " & $dropped & "\n")
+  # The extra C files of a split module, content-stable like the `.c`. The
+  # manifest names them for the link stage, with a hash of each so it changes
+  # (and re-fires `link`, which declares it) exactly when a part does; the `.c`
+  # alone would not, as a body edit can leave part 0 byte-identical.
+  var manifest = ""
+  for k in 1 ..< parts.len:
+    let pf = cPartFile(cfile, k)
+    if not fileExists(pf) or readFile(pf) != parts[k]:
+      writeFile(pf, parts[k])
+    manifest.add pf & " " & $hash(parts[k]) & "\n"
+  var k = parts.len
+  while fileExists(cPartFile(cfile, k)):  # left over from a bigger split
+    let pf = AbsoluteFile cPartFile(cfile, k)
+    removeFile(pf.string)
+    removeFile(toObjFile(g.config, pf).string)
+    removeFile(cfileHashFile(g.config, pf).string)
+    inc k
+  let manifestFile = cfile & CPartsExt
+  if not fileExists(manifestFile) or readFile(manifestFile) != manifest:
+    writeFile(manifestFile, manifest)
   if isDefined(g.config, "icDceCheck"):
     stderr.writeLine "[icEmit] " & extractFilename(cfile) & " dropped " &
       $dropped & " bodies (" & $code.len & " bytes)"
@@ -922,17 +1080,13 @@ proc generateLinkStage(g: ModuleGraph; mainFileIdx: FileIndex) =
     addedCFiles.incl extractFilename(cpath)
     # The directives this module recorded (`{.passL: "-lm".}` etc.); without
     # them math's `-lm` is lost -> undefined `floor`/`pow`/… at link.
-    applyBackendActions(g, cpath & BackendActionsExt)
-    let cfile = AbsoluteFile cpath
-    var cf = Cfile(nimname: splitFile(cfile).name, cname: cfile,
-                   obj: completeCfilePath(g.config, toObjFile(g.config, cfile)),
-                   flags: {})
+    applyBackendActions(g, cpath)
     # `addExternalFileToCompile` (not `addFileToCompile`) gates each `.c` on its
     # SHA1 footprint: an unchanged `.c` keeps its `.o` and is flagged Cached, so
     # `callCCompiler` skips its compile but still links the existing object. This
     # is what makes a localized edit recompile only the handful of `.c`s the
     # `emit` stage actually rewrote, instead of every object every time.
-    addExternalFileToCompile(g.config, cf)
+    addCFileWithParts(g, cpath, splitFile(cpath).name)
 
   # deps.nim's static scanner can keep a CONDITIONALLY-imported module as a build
   # node (e.g. `net`'s `when defineSsl: import openssl`) that the manifest above
@@ -954,11 +1108,8 @@ proc generateLinkStage(g: ModuleGraph; mainFileIdx: FileIndex) =
         if addedCFiles.containsOrIncl(cbase): continue
         let cfile = AbsoluteFile(nimcache / cbase)
         if not fileExists(cfile.string): continue
-        applyBackendActions(g, cfile.string & BackendActionsExt)
-        var cf = Cfile(nimname: cbase, cname: cfile,
-                       obj: completeCfilePath(g.config, toObjFile(g.config, cfile)),
-                       flags: {})
-        addExternalFileToCompile(g.config, cf)
+        applyBackendActions(g, cfile.string)
+        addCFileWithParts(g, cfile.string, cbase)
   if g.config.cmd != cmdTcc:
     extccomp.callCCompiler(g.config)
 
@@ -971,6 +1122,11 @@ proc generateCode*(g: ModuleGraph; mainFileIdx: FileIndex) =
     return
   elif g.config.icBackendStage == "cg":
     timed tStage: generateCgStage(g, mainFileIdx)
+    return
+  elif g.config.icBackendStage == "lowered":
+    # The ordering barrier between `lower` and `cg`; see `LoweredBarrierFile`.
+    let barrier = getNimcacheDir(g.config).string / LoweredBarrierFile
+    if not fileExists(barrier): writeFile(barrier, "")
     return
   elif g.config.icBackendStage == "merge":
     timed tStage:
@@ -989,4 +1145,4 @@ proc generateCode*(g: ModuleGraph; mainFileIdx: FileIndex) =
     return
   else:
     rawMessage(g.config, errGenerated,
-      "the per-module NIF backend requires --icBackendStage:lower|cg|merge|emit|link")
+      "the per-module NIF backend requires --icBackendStage:lower|lowered|cg|merge|emit|link")

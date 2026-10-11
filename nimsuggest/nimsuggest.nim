@@ -75,6 +75,8 @@ Options:
     --info:capabilities     return the capabilities supported by nimsuggest
   --refresh               perform automatic refreshes to keep the analysis precise
   --maxresults:N          limit the number of suggestions to N
+  --maxMemory:N           quit when resident memory exceeds N megabytes (0 = no cap);
+                          the default is 4000
   --tester                implies --stdin and outputs a line
                           '""" & DummyEof & """' for the tester
   --find                  attempts to find the project file of the current project
@@ -104,6 +106,11 @@ var
   gLogging = defined(logging)
   gRefresh: bool
   gAutoBind = false
+  gMaxMemoryKb = # resident memory cap, --maxMemory:N (MB)
+    when sizeof(int) == 8: # 64 bit CPU
+      4000 * 1024
+    else: # 32 bit CPU
+      2000 * 1024
 
   requests: Channel[string]
   results: Channel[Suggest]
@@ -132,11 +139,16 @@ const
          "type 'debug' to toggle debug mode on/off\n" &
          "type 'terse' to toggle terse mode on/off"
   #List of currently supported capabilities. So lang servers/ides can iterate over and check for what's enabled
-  Capabilities = [
-    "con", #current NimSuggest supports the `con` commmand
-    "exceptionInlayHints",
-    "unknownFile", #current NimSuggest can handle unknown files
-  ]
+  Capabilities =
+    @[
+      "con", #current NimSuggest supports the `con` commmand
+      "exceptionInlayHints",
+      "unknownFile", #current NimSuggest can handle unknown files
+    ] &
+    # the memory cap is only enforced where the resident size is readable
+    # (Linux /proc, macOS libproc, Windows working set)
+    (when defined(linux) or defined(macosx) or defined(windows):
+      @["maxMemory"] else: @[])
 
 proc parseQuoted(cmd: string; outp: var string; start: int): int =
   var i = start
@@ -664,6 +676,10 @@ proc mainCommand(graph: ModuleGraph) =
         line: toLinenumber(info), column: toColumn(info), doc: msg, forth: $sev)
       graph.suggestErrors.mgetOrPut(info.fileIndex, @[]).add suggest
 
+  # Started before the initial compilation so that a runaway compilation
+  # is also capped:
+  hookMemMonitor(gMaxMemoryKb)
+
   # compile the project before showing any input so that we already
   # can answer questions right away:
   benchmark "Initial compilation":
@@ -756,6 +772,8 @@ proc processCmdLine*(pass: TCmdLinePass, cmd: string; conf: ConfigRef) =
           gRefresh = true
       of "maxresults":
         conf.suggestMaxResults = parseInt(p.val)
+      of "maxmemory":
+        gMaxMemoryKb = parseInt(p.val) * 1024
       of "find":
         findProject = true
       of "clientprocessid":
@@ -798,8 +816,10 @@ proc handleCmdLine(cache: IdentCache; conf: ConfigRef) =
   var graph = newModuleGraph(cache, conf)
   if self.loadConfigsAndProcessCmdLine(cache, conf, graph):
 
+    # not for a NimScript project, as `nim check foo.nims` doesn't: its system module,
+    # compiled for the VM, breaks with ORC's defines (nimSeqsV2)
     if conf.selectedGC == gcUnselected and
-          conf.backend != backendJs:
+          conf.backend != backendJs and optWasNimscript notin conf.globalOptions:
       initOrcDefines(conf)
     mainCommand(graph)
 
@@ -913,6 +933,85 @@ proc findSymDataInRange(graph: ModuleGraph, file: AbsoluteFile; startLine, start
     startPos = newLineInfo(fileIdx, startLine, startCol)
     endPos = newLineInfo(fileIdx, endLine, endCol)
   result = findSymDataInRange(graph, startPos, endPos, isGenericInstance)
+
+proc symbolEqual(left, right: PSym): bool
+
+proc findSymDataAll(graph: ModuleGraph, trackPos: TLineInfo): seq[SymInfoPair] =
+  ## The symbol `findSymData` picks at `trackPos`, followed by every *other*
+  ## routine overload of the same name recorded at that exact position: a call
+  ## inside a generic body is resolved once per instantiation and different
+  ## instantiations may pick different overloads, each of which is a correct
+  ## definition. Anything else keeps the single-result behaviour.
+  result = @[]
+  let primary = graph.findSymData(trackPos)
+  if primary.isNil: return
+  result.add primary[]
+  if primary.sym.kind notin routineKinds: return
+  let db = graph.fileSymbols(trackPos.fileIndex)
+  for i in db.lineInfo.low..db.lineInfo.high:
+    let s = db.getSymInfoPair(i)
+    if s.sym.kind in routineKinds and not s.isGenericInstance and
+        s.info.exactEquals(primary.info) and s.sym.name.id == primary.sym.name.id and
+        not result.anyIt(it.sym.symbolEqual(s.sym)):
+      result.add s
+
+proc identInRoutineBody(n: PNode, trackPos: TLineInfo, inRoutine = false): bool =
+  ## Is there an identifier at `trackPos` inside the body of a routine
+  ## (parsed tree)? Only routine bodies can be generic (explicitly or via
+  ## typeclass params), and only those are skipped by the regular analysis.
+  if n.isNil: return false
+  case n.kind
+  of nkIdent:
+    inRoutine and isTracked(n.info, trackPos, n.ident.s.len)
+  of routineDefs:
+    n.info.line <= trackPos.line and trackPos.line <= n.endInfo.line and
+      identInRoutineBody(n[bodyPos], trackPos, inRoutine = true)
+  else:
+    for i in 0 ..< safeLen(n):
+      if identInRoutineBody(n[i], trackPos, inRoutine): return true
+    false
+
+proc findSymDataWithFallback(graph: ModuleGraph, fileIndex, moduleToCompile: FileIndex,
+                             line, col: int): seq[SymInfoPair] =
+  ## Cheap first: the symbol database of the regular compilation, which covers
+  ## everything the project instantiates. Inside a generic body that the
+  ## project never instantiates it records nothing (the pre-pass leaves calls
+  ## as symbol choices), so fall back to the speculative check in
+  ## `semIdeForTemplateOrGeneric`: re-sem the module with the cursor in
+  ## `trackPos`. It resolves what the parameter constraints allow and stays
+  ## silent otherwise, so it cannot produce a wrong answer, only none.
+  let conf = graph.config
+  let trackPos = newLineInfo(fileIndex, line, col)
+  result = graph.findSymDataAll(trackPos)
+  if result.len > 0 or graph.getModule(moduleToCompile) == nil or
+      not identInRoutineBody(parseFile(fileIndex, graph.cache, conf), trackPos):
+    return
+  myLog fmt "Symbol lookup at {conf $ trackPos} failed; recompiling with the cursor tracked"
+  # The recompile drops symbol databases (`markDirty` on this file, and on the
+  # direct importers via the dirty-module path) that only the dependents could
+  # regenerate, and records the speculative check's errors as diagnostics.
+  # Snapshot both and put them back, keeping only the results at the cursor.
+  let savedSymbols = graph.suggestSymbols
+  let savedErrors = graph.suggestErrors
+  # With `trackPos` set, `suggestSym` would also run the v2 machinery for the
+  # current `ideCmd` and emit results straight from the compilation; compile
+  # like the initial pass does.
+  let savedIdeCmd = conf.ideCmd
+  conf.ideCmd = ideNone
+  conf.m.trackPos = trackPos
+  conf.m.trackPosAttached = false
+  try:
+    graph.markDirty moduleToCompile
+    graph.recompilePartially(moduleToCompile)
+    result = graph.findSymDataAll(trackPos)
+  finally:
+    conf.ideCmd = savedIdeCmd
+    conf.m.trackPos = default(TLineInfo)
+    graph.suggestErrors = savedErrors
+    graph.suggestSymbols = savedSymbols
+  for s in result:
+    graph.suggestSymbols.add(s, optIdeExceptionInlayHints in conf.globalOptions)
+  myLog fmt "Speculative recompile found {result.len} symbol(s)"
 
 proc markDirtyIfNeeded(graph: ModuleGraph, file: string, originalFileIdx: FileIndex) =
   let sha = $sha1.secureHashFile(file)
@@ -1106,6 +1205,7 @@ proc executeNoHooksV3(cmd: IdeCmd, file: AbsoluteFile, dirtyfile: AbsoluteFile, 
   # cursor get re-checked. The query position stays in the include file.
   var moduleToCompile: FileIndex = default(FileIndex)
   var isIncludeQuery = false
+  var dataComplete = false
 
   if not (cmd in {ideRecompile, ideGlobalSymbols}):
     fileIndex = fileInfoIdx(conf, file)
@@ -1114,6 +1214,7 @@ proc executeNoHooksV3(cmd: IdeCmd, file: AbsoluteFile, dirtyfile: AbsoluteFile, 
     if conf.ideImportsFromNif and graph.needsIncludeScan(fileIndex):
       discard graph.registerIncluderFromNif(fileIndex)
     isIncludeQuery = graph.inclToMod.hasKey(fileIndex)
+    dataComplete = graph.suggestDataComplete(fileIndex)
     moduleToCompile = if isIncludeQuery: graph.parentModule(fileIndex) else: fileIndex
     msgs.setDirtyFile(
       conf,
@@ -1134,7 +1235,7 @@ proc executeNoHooksV3(cmd: IdeCmd, file: AbsoluteFile, dirtyfile: AbsoluteFile, 
 
   # these commands require partially compiled project
   elif cmd in {ideSug, ideCon, ideOutline, ideHighlight, ideDef, ideChkFile, ideType, ideDeclaration, ideExpand} and
-       (graph.needsCompilation(fileIndex) or cmd in {ideSug, ideCon} or isIncludeQuery):
+       (cmd in {ideSug, ideCon} or isIncludeQuery or not dataComplete or graph.needsCompilation(fileIndex)):
     # for ideSug use v2 implementation
     if cmd in {ideSug, ideCon}:
       conf.m.trackPos = newLineInfo(fileIndex, line, col)
@@ -1144,19 +1245,20 @@ proc executeNoHooksV3(cmd: IdeCmd, file: AbsoluteFile, dirtyfile: AbsoluteFile, 
       # An include file's includer must be (re)compiled from source so the
       # include body is re-sem'd; force it dirty since the include file itself
       # is not a module the dirty machinery tracks.
-      if isIncludeQuery:
+      if isIncludeQuery or (not dataComplete and not graph.needsCompilation(fileIndex)):
         graph.markDirty moduleToCompile
         graph.markClientsDirty moduleToCompile
       graph.recompilePartially(moduleToCompile)
 
   case cmd
   of ideDef:
-    let s = graph.findSymData(file, line, col)
-    if not s.isNil:
+    # Several results are possible and correct: see `findSymDataAll`.
+    for s in graph.findSymDataWithFallback(fileIndex, moduleToCompile, line, col):
       graph.suggestResult(s.sym, s.sym.info)
   of ideType:
-    let s = graph.findSymData(file, line, col)
-    if not s.isNil and s.sym.typ != nil:
+    let symbols = graph.findSymDataWithFallback(fileIndex, moduleToCompile, line, col)
+    if symbols.len > 0 and symbols[0].sym.typ != nil:
+      let s = symbols[0]
       let typeSym = s.sym.typ.sym
       if typeSym != nil:
         graph.suggestResult(typeSym, typeSym.info, ideType)
@@ -1165,11 +1267,11 @@ proc executeNoHooksV3(cmd: IdeCmd, file: AbsoluteFile, dirtyfile: AbsoluteFile, 
         if genericType != nil:
           graph.suggestResult(genericType, genericType.info, ideType)
   of ideUse, ideDus:
-    let symbol = graph.findSymData(file, line, col)
-    if not symbol.isNil:
+    let symbols = graph.findSymDataWithFallback(fileIndex, moduleToCompile, line, col)
+    if symbols.len > 0:
       var res: seq[SymInfoPair] = @[]
       for s in graph.suggestSymbolsIter:
-        if s.sym.symbolEqual(symbol.sym):
+        if symbols.anyIt(s.sym.symbolEqual(it.sym)):
           res.add(s)
       for s in res.deduplicateSymInfoPair():
         graph.suggestResult(s.sym, s.info)
@@ -1248,8 +1350,7 @@ proc executeNoHooksV3(cmd: IdeCmd, file: AbsoluteFile, dirtyfile: AbsoluteFile, 
         graph.suggestResult(s.sym, s.info)
 
   of ideDeclaration:
-    let s = graph.findSymData(file, line, col)
-    if not s.isNil:
+    for s in graph.findSymDataWithFallback(fileIndex, moduleToCompile, line, col):
       # find first mention of the symbol in the file containing the definition.
       # It is either the definition or the declaration.
       var first: SymInfoPair = default(SymInfoPair)

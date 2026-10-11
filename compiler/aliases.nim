@@ -25,7 +25,7 @@ type
     pfStructural    ## use structural prefix-chain detection and tree-walk
     pfBidirectional ## also check reverse direction per field in nkObjConstr
 
-proc isCompileTimeOnlyNode(n: PNode): bool {.inline.} =
+proc isCompileTimeOnlyNode*(n: PNode): bool {.inline.} =
   ## `typeof` and typedesc/static values describe types at compile time; they
   ## do not read the runtime location that alias analysis is protecting.
   n.kind == nkTypeOfExpr or (n.typ != nil and n.typ.isCompileTimeOnly)
@@ -164,6 +164,11 @@ proc isPartOf*(a, b: PNode; flags: set[PartFlag] = {}): TAnalysisResult =
   ##  ```
   if a.isCompileTimeOnlyNode or b.isCompileTimeOnlyNode:
     return arNo
+  # Literals do not read a runtime location. In particular, the reverse
+  # constructor check must not mistake a literal for a read through a ref
+  # merely because its type occurs in the referenced object.
+  if a.kind in {nkCharLit..nkNilLit} or b.kind in {nkCharLit..nkNilLit}:
+    return arNo
 
   if a.kind == b.kind:
     case a.kind
@@ -240,7 +245,11 @@ proc isPartOf*(a, b: PNode; flags: set[PartFlag] = {}): TAnalysisResult =
     of DerefKinds:
       # a* !<| b[] iff
       result = arNo
-      if isPartOf(a.typ, b.typ) != arNo:
+      if a.kind == nkSym and a.sym.kind == skTemp and sfGlobal notin a.sym.flags:
+        # a compiler introduced temporary is a local whose address is not
+        # taken, it cannot live behind a pointer
+        discard
+      elif isPartOf(a.typ, b.typ) != arNo:
         result = isPartOf(a, b[0], flags)
         if result == arNo: result = arMaybe
 
@@ -289,10 +298,13 @@ proc isPartOf*(a, b: PNode; flags: set[PartFlag] = {}): TAnalysisResult =
           result = res
           if res == arYes: break
     of nkBracket:
-      if b.len > 0:
-        result = isPartOf(a, b[0], flags)
-      else:
-        result = arNo
+      # every element can read `a`, not just the first one (bug #26329)
+      result = arNo
+      for i in 0..<b.len:
+        let res = isPartOf(a, b[i], flags)
+        if res != arNo:
+          result = res
+          if res == arYes: break
     else:
       if pfStructural in flags:
         for i in 0..<b.safeLen:

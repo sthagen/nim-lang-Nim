@@ -32,11 +32,12 @@
 ## would misresolve.
 
 import options, commands, lineinfos, pathutils, msgs
+from icmodnames import moduleSuffix
 import std/[algorithm, os, sets, osproc, times, streams, syncio, strutils]
 import "../dist/nimony/src/lib" / [nifbuilder, nifcoreparse]
 
 const
-  IcConfigVersion* = "2"
+  IcConfigVersion* = "4"
     ## Artifact format version. Bump on any layout change here so a child built
     ## by an older compiler rejects a stale artifact and falls back to normal
     ## config loading instead of replaying a format it cannot parse.
@@ -80,6 +81,15 @@ proc writeIcConfig*(conf: ConfigRef; outfile: string) =
       # replay makes the overlap harmless.
       for p in conf.searchPaths:
         b.addStrLit p.string
+    b.withTree "lazypaths":
+      # Same for the nimble package directories (`nimblepath` in `nim.cfg`):
+      # `findModule` falls back to them after `searchPaths`, so without them the
+      # driver cannot resolve `import libcurl` from ~/.nimble/pkgs2.
+      for p in conf.lazyPaths:
+        b.addStrLit p.string
+    b.withTree "nimblepaths":
+      for p in conf.nimblePaths:
+        b.addStrLit p.string
     b.withTree "switches":
       for sw in conf.icConfigSwitches:
         b.addTree "sw"
@@ -103,6 +113,8 @@ proc applyIcConfig*(conf: ConfigRef; infile: string): bool =
     nimcacheTag = tags.registerTag("nimcache")
     cppTag = tags.registerTag("cppdefines")
     pathsTag = tags.registerTag("searchpaths")
+    lazyTag = tags.registerTag("lazypaths")
+    nimbleTag = tags.registerTag("nimblepaths")
     switchesTag = tags.registerTag("switches")
     swTag = tags.registerTag("sw")
   var buf = parseFromFile(infile, 1000, pool, tags)
@@ -154,6 +166,17 @@ proc applyIcConfig*(conf: ConfigRef; infile: string): bool =
             # path a child already received via a forwarded `--path` argument.
             let d = AbsoluteDir(strVal(c))
             if not conf.searchPaths.contains(d): conf.searchPaths.add d
+            inc c
+          else:
+            skip c
+      elif c.cursorTagId == lazyTag or c.cursorTagId == nimbleTag:
+        let isLazy = c.cursorTagId == lazyTag
+        c.loopInto:
+          if c.kind == StrLit:
+            let d = AbsoluteDir(strVal(c))
+            if isLazy:
+              if not conf.lazyPaths.contains(d): conf.lazyPaths.add d
+            elif not conf.nimblePaths.contains(d): conf.nimblePaths.add d
             inc c
           else:
             skip c
@@ -244,6 +267,9 @@ proc ensureIcConfig*(conf: ConfigRef) =
   ## process replays its output). The artifact lives in the nimcache derived from
   ## the command line (pre-config-parse), which is the one the children are told;
   ## a `--nimcache:` set inside `nim.cfg` is recovered from the artifact itself.
+  # Resolve the actual source before canonicalizing an extensionless argument.
+  # The spelling without `.nim` may not exist, or may name a compiled binary.
+  conf.setFromProjectName(addFileExt(conf.projectFull, NimExt).string)
   let cacheDir = getNimcacheDir(conf).string
   # Start from a clean cache when the on-disk NIF format stamp is absent or stale
   # (see `icFormatVersion`). This must happen HERE, before the config artifact is
@@ -256,7 +282,11 @@ proc ensureIcConfig*(conf: ConfigRef) =
     removeDir(cacheDir)
     createDir(cacheDir)
     writeFile(versionFile, icFormatVersion)
-  let outPath = cacheDir / "ic_config.cfg.nif"
+  # Projects in the same nimcache can load different config.nims chains or
+  # project-specific .cfg files. Keep their snapshots separate; the build
+  # signature still compares effective settings so equivalent configs can
+  # share compiled modules.
+  let outPath = cacheDir / ("ic_config_" & moduleSuffix(conf.projectFull.string, []) & ".cfg.nif")
   if not fileExists(outPath) or sourcesChanged(outPath):
     createDir(cacheDir)
     # Re-invoke ourselves as the config producer: reuse this process's command

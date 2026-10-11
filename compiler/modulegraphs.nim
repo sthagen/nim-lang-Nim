@@ -79,8 +79,9 @@ type
                                   # `nim nifc`, bucketed only after every
                                   # module is loaded (`flushMethodReplays`)
     icImplDeps*: IntSet           # NeedsImpl edge tracking under `nim m`:
-                                  # module ids (FileIndex) whose routine BODIES
-                                  # this compilation consumed at compile time.
+                                  # module ids (FileIndex) whose routine bodies
+                                  # or generic type instances this compilation
+                                  # consumed at compile time.
                                   # Written to the `.edges` sidecar; deps.nim
                                   # then gates the dependent on those modules'
                                   # IMPL cookie instead of the iface cookie, so
@@ -91,16 +92,25 @@ type
                                   # consumer records an edge here: VM-compiled /
                                   # getImpl'ed bodies (recordIcImplDep from vm/
                                   # vmgen), expanded templates (semTemplateExpr)
-                                  # and instantiated generics (generateInstance).
+                                  # and instantiated generics (generateInstance,
+                                  # searchInstTypes).
                                   # Inline iterators / `inline` procs are NOT
-                                  # tracked: they are inlined at codegen, where
-                                  # the nifc backend's NIF-mtime invalidation
-                                  # already re-codegens their users.
+                                  # tracked: they are inlined by the backend,
+                                  # whose `lower`/`cg` rules depend on the
+                                  # bodies they read (see `icBodyDeps`).
+    icBodyDeps*: IntSet           # backend `lower`/`cg` stages: module ids whose
+                                  # routine BODIES this process read (inlined
+                                  # iterators, embedded foreign definitions).
+                                  # Written to a sidecar so deps.nim can make
+                                  # the stage's rule depend on their NIFs.
     icQualIfaces*: IntSet         # module positions whose interface tables were
                                   # populated ONLY for qualified access through a
                                   # module re-export (`import x; export x`); the
                                   # Iface.module stays nil so a later direct
                                   # import still takes the full load path
+    vmInjecting*: bool            # the VM injects destructors: hooks that
+                                  # are missing are not lifted (that could
+                                  # conflict with hooks declared later)
     inVMTransform*: int           # >0 while the VM compiles a routine body
                                   # (vmgen.genProc's transformBody): hooks lifted
                                   # there (e.g. for closure-env types of LOADED
@@ -119,6 +129,9 @@ type
                                             # first module that included it
     importStack*: seq[FileIndex]  # The current import stack. Used for detecting recursive
                                   # module dependencies.
+    cycleGroups*: Table[FileIndex, FileIndex]
+      ## the modules that belong to a group of modules connected by
+      ## `import m {.cyclic.}`, mapped to the module the group was entered by
     backend*: RootRef # minor hack so that a backend can extend this easily
     config*: ConfigRef
     cache*: IdentCache
@@ -177,6 +190,11 @@ type
                                   # (`genIcModuleDestroyGlobals`), already in
                                   # call order; only the main module's `cg`
                                   # fills this, from the `.c.nif` meta heads
+    demandCycleBody*: proc (prc: PSym) {.closure.}
+      ## set while a cycle group (`import m {.cyclic.}`) is checked: effect
+      ## tracking asks for the deferred body of a routine of the group before it
+      ## falls back to the pessimistic assumptions about a routine without
+      ## effects.
     demandRoutineBody*: proc (prc: PSym) {.closure.}
       ## `--deferBodies:on` (doc/parallel_compiler.md §2.3 / §4.6): "this body
       ## is needed NOW". A deferred unit's body is unsemmed until the module's
@@ -203,9 +221,10 @@ type
     procGlobals*: seq[PNode]
     nifReplayActions*: Table[int32, seq[PNode]]  # module position -> replay actions for NIF
     nifExpansions*: Table[int32, seq[(PSym, TLineInfo)]]
-      # module position -> (template/macro sym, call-site info) for every expansion
-      # in that module. Templates/macros leave no trace in the sem'checked AST, so
-      # this side-channel (written into the `.bif`, see ast2nif) is what lets
+      # module position -> (template/macro/generic proc sym, call-site info) for every
+      # expansion in that module. Templates/macros leave no trace in the sem'checked AST
+      # (generic proc instantiations don't point to the original generic definition),
+      # so this side-channel (written into the `.bif`, see ast2nif) is what lets
       # `nim track --usages`/`--def` find them. Populated by `rememberExpansion`.
     cachedMods: IntSet
     hookClosure: IntSet # modules whose serialized hooks were already registered
@@ -823,11 +842,9 @@ proc createMagic*(g: ModuleGraph; idgen: IdGenerator; name: string, m: TMagic): 
 proc createMagic(g: ModuleGraph; name: string, m: TMagic): PSym =
   result = createMagic(g, g.idgen, name, m)
 
-proc uniqueModuleName*(conf: ConfigRef; m: PSym): string =
+proc uniqueModuleName*(conf: ConfigRef; m: PSym; path: AbsoluteFile): string =
   ## The unique module name is guaranteed to only contain {'A'..'Z', 'a'..'z', '0'..'9', '_'}
   ## so that it is useful as a C identifier snippet.
-  let fid = FileIndex(m.position)
-  let path = AbsoluteFile toFullPath(conf, fid)
   var isLib = false
   var rel = ""
   if path.string.startsWith(conf.libpath.string):
@@ -865,6 +882,27 @@ proc uniqueModuleName*(conf: ConfigRef; m: PSym): string =
       # We mangle upper letters too so that there cannot
       # be clashes with our special meanings of 'Z' and 'O'
       result.addInt ord(c)
+
+proc uniqueModuleName*(conf: ConfigRef; m: PSym): string =
+  uniqueModuleName(conf, m, AbsoluteFile toFullPath(conf, FileIndex(m.position)))
+
+proc loadsFromNif*(g: ModuleGraph; fileIdx: FileIndex): bool =
+  ## `nim m` loads an import from its precompiled NIF file. The members of the
+  ## current strongly-connected import group (`--icGroup`) are mutually
+  ## recursive with the main module and have no precompiled NIF yet, so they
+  ## are compiled from source in this same process.
+  when defined(nimKochBootstrap):
+    result = false
+  else:
+    result = g.config.cmd == cmdM and
+      not g.withinSystem and
+      not g.config.isDefined("nimscript") and
+      (g.config.icGroup.len == 0 or
+       toFullPath(g.config, fileIdx) notin g.config.icGroup)
+
+proc inSameCycleGroup*(g: ModuleGraph; a, b: FileIndex): bool =
+  let ga = g.cycleGroups.getOrDefault(a, InvalidFileIdx)
+  result = ga != InvalidFileIdx and ga == g.cycleGroups.getOrDefault(b, InvalidFileIdx)
 
 proc registerModule*(g: ModuleGraph; m: PSym) =
   assert m != nil
@@ -909,6 +947,7 @@ proc initModuleGraphFields(result: ModuleGraph) =
   result.importDeps = initTable[FileIndex, seq[FileIndex]]()
   result.ifaces = @[]
   result.importStack = @[]
+  result.cycleGroups = initTable[FileIndex, FileIndex]()
   result.inclToMod = initTable[FileIndex, FileIndex]()
   result.owners = @[]
   result.suggestSymbols = initTable[FileIndex, SuggestFileSymbolDatabase]()
@@ -966,6 +1005,13 @@ proc recordIcImplDep*(g: ModuleGraph; s: PSym) =
   if g.config.cmd == cmdM and s != nil and s.kind in routineKinds and
      s.itemId.module >= 0 and not isBackendMinted(s.itemId):
     g.icImplDeps.incl module(s.itemId).int
+
+proc recordIcImplDep*(g: ModuleGraph; t: PType) =
+  ## Reusing a generic type instance embeds its defining module's type ID.
+  ## A body edit can change that ID without changing the interface cookie.
+  if g.config.cmd == cmdM and t != nil and t.itemId.module >= 0 and
+     not isBackendMinted(t.itemId):
+    g.icImplDeps.incl module(t.itemId).int
 
 proc dependsOn(a, b: int): int {.inline.} = (a shl 15) + b
 
@@ -1048,6 +1094,7 @@ proc needsCompilation*(g: ModuleGraph, fileIdx: FileIndex): bool =
       return true
 
 proc getBody*(g: ModuleGraph; s: PSym): PNode {.inline.} =
+  if g.config.cmd == cmdNifC: g.icBodyDeps.incl s.itemId.module
   result = s.ast[bodyPos]
   if result != nil and nfLazyBody in result.flags and forceLazyBodyHook != nil:
     # Sanctioned body-access gate (see astdef.bodyPos): materialize the deferred
@@ -1359,6 +1406,13 @@ proc belongsToStdlib*(graph: ModuleGraph, sym: PSym): bool =
   # `nim c` build (system compiled from source) the ids match too, so this is a
   # no-op there.
   sym.getPackageSymbol.name.id == graph.systemModule.getPackageSymbol.name.id
+
+proc suggestDataComplete*(g: ModuleGraph; fileIdx: FileIndex): bool =
+  g.suggestSymbols.getOrDefault(fileIdx).isComplete
+
+proc setSuggestDataComplete*(g: ModuleGraph; fileIdx: FileIndex; complete: bool) =
+  g.suggestSymbols.mgetOrPut(fileIdx, newSuggestFileSymbolDatabase(fileIdx,
+    optIdeExceptionInlayHints in g.config.globalOptions)).isComplete = complete
 
 proc fileSymbols*(graph: ModuleGraph, fileIdx: FileIndex): SuggestFileSymbolDatabase =
   result = graph.suggestSymbols.getOrDefault(fileIdx, newSuggestFileSymbolDatabase(fileIdx, optIdeExceptionInlayHints in graph.config.globalOptions))

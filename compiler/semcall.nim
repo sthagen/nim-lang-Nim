@@ -377,32 +377,38 @@ proc presentFailedCandidates(c: PContext, n: PNode, errors: CandidateErrors):
             candidates.add "\n"
         of kGenericParamTypeMismatch:
           let pos = err.firstMismatch.arg
-          doAssert n[0].kind == nkBracketExpr and pos < n[0].len
-          let arg = n[0][pos]
-          doAssert arg != nil
           var wanted = err.firstMismatch.formal.typ
           if wanted.kind == tyGenericParam and wanted.genericParamHasConstraints:
             wanted = wanted.genericConstraint
-          let got = arg.typ.skipTypes({tyTypeDesc})
-          doAssert err.firstMismatch.formal != nil
-          doAssert wanted != nil
-          doAssert got != nil
-          candidates.add "  generic parameter mismatch, expected "
-          candidates.addTypeDeclVerboseMaybe(c.config, wanted)
-          candidates.add " but got '"
-          candidates.add renderTree(arg)
-          candidates.add "' of type: "
-          candidates.addTypeDeclVerboseMaybe(c.config, got)
-          if nArg.kind in nkSymChoices:
+          if not (n[0].kind == nkBracketExpr and pos < n[0].len):
+            # the explicit generic arguments are gone, e.g. for a call that
+            # was produced from an object field's default value (#24904)
+            candidates.add "  generic parameter mismatch, expected "
+            candidates.addTypeDeclVerboseMaybe(c.config, wanted)
             candidates.add "\n"
-            candidates.add ambiguousIdentifierMsg(nArg, indent = 2)
-          if got != nil and got.kind == tyProc and wanted.kind == tyProc:
-            # These are proc mismatches so,
-            # add the extra explict detail of the mismatch
-            candidates.addPragmaAndCallConvMismatch(wanted, got, c.config)
-          if got != nil:
-            effectProblem(wanted, got, candidates, c)
-          candidates.add "\n"
+          else:
+            let arg = n[0][pos]
+            doAssert arg != nil
+            let got = arg.typ.skipTypes({tyTypeDesc})
+            doAssert err.firstMismatch.formal != nil
+            doAssert wanted != nil
+            doAssert got != nil
+            candidates.add "  generic parameter mismatch, expected "
+            candidates.addTypeDeclVerboseMaybe(c.config, wanted)
+            candidates.add " but got '"
+            candidates.add renderTree(arg)
+            candidates.add "' of type: "
+            candidates.addTypeDeclVerboseMaybe(c.config, got)
+            if nArg.kind in nkSymChoices:
+              candidates.add "\n"
+              candidates.add ambiguousIdentifierMsg(nArg, indent = 2)
+            if got != nil and got.kind == tyProc and wanted.kind == tyProc:
+              # These are proc mismatches so,
+              # add the extra explict detail of the mismatch
+              candidates.addPragmaAndCallConvMismatch(wanted, got, c.config)
+            if got != nil:
+              effectProblem(wanted, got, candidates, c)
+            candidates.add "\n"
         of kUnknown: discard "do not break 'nim check'"
       else:
         candidates.add("  first type mismatch at position: " & $err.firstMismatch.arg)
@@ -727,11 +733,17 @@ proc markConvertersUsed*(c: PContext, n: PNode) =
     if a.kind == nkHiddenCallConv and a[0].kind == nkSym:
       markUsed(c, a.info, a[0].sym)
 
+proc commitGenericExpansions(c: PContext, m: TCandidate) =
+  for expansion in m.pendingGenericExpansions:
+    rememberExpansion(c, expansion.info, expansion.sym)
+
 proc indexTypesMatch(c: PContext, f, a: PType, arg: PNode): PNode =
   var m = newCandidate(c, f)
   result = paramTypesMatch(m, f, a, arg, nil)
   if m.genericConverter and result != nil:
     instGenericConvertersArg(c, result, m)
+  if result != nil:
+    commitGenericExpansions(c, m)
   when defined(icDbg):
     if result == nil and f != nil and a != nil and f.kind == tyEnum:
       echo "INDEXMISMATCH f=", typeToString(f), " itemId=", f.itemId,
@@ -750,6 +762,7 @@ proc inferWithMetatype(c: PContext, formal: PType,
   if m.genericConverter and result != nil:
     instGenericConvertersArg(c, result, m)
   if result != nil:
+    commitGenericExpansions(c, m)
     # This almost exactly replicates the steps taken by the compiler during
     # param matching. It performs an embarrassing amount of back-and-forth
     # type jugling, but it's the price to pay for consistency and correctness
@@ -915,6 +928,8 @@ proc semResolvedCall(c: PContext, x: var TCandidate,
           x.call.add tn
         else:
           internalAssert c.config, false
+  if finalCallee.instantiatedFrom != nil:
+    rememberExpansion(c, info, finalCallee.instantiatedFrom)
   markUsed(c, info, finalCallee, isGenericInstance = true)
   onUse(info, finalCallee, isGenericInstance = true)
 
@@ -925,6 +940,7 @@ proc semResolvedCall(c: PContext, x: var TCandidate,
   if finalCallee.magic notin {mArrGet, mArrPut}:
     result.typ = finalCallee.typ.returnType
   updateDefaultParams(c, result)
+  commitGenericExpansions(c, x)
 
 proc semOverloadedCall(c: PContext, n, nOrig: PNode,
                        filter: TSymKinds, flags: TExprFlags;
@@ -1020,6 +1036,8 @@ proc explicitGenericInstantiation(c: PContext, n: PNode, s: PSym, doError: bool)
         result.typ = makeTypeFromExpr(c, result.copyTree)
       elif doError:
         notFoundError(c, n, errors)
+    else:
+      rememberExpansion(c, getCallLineInfo(n), s)
   elif a.kind in {nkClosedSymChoice, nkOpenSymChoice}:
     # choose the generic proc with the proper number of type parameters.
     result = newNodeI(a.kind, getCallLineInfo(n))

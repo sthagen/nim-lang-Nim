@@ -259,6 +259,9 @@ proc mangleName(m: BModule, s: PSym): Rope =
           x.add("HEX" & toHex(ord(c), 2))
         inc i
       result = rope(x)
+    if s.kind == skField and sfCapturedLocal in s.flags:
+      # captured locals may share a name, see `lowerings.addField`
+      result.add "_" & $s.position
     # From ES5 on reserved words can be used as object field names
     if s.kind != skField:
       if m.config.hcrOn:
@@ -2440,7 +2443,7 @@ proc genMagic(p: PProc, n: PNode, r: var TCompRes) =
   of mChr: gen(p, n[1], r)
   of mArrToSeq:
     # only array literals doesn't need copy
-    if n[1].kind == nkBracket:
+    if n[1].kind == nkBracket and not isDefaultBroadcastArray(n[1], p.config):
       genJSArrayConstr(p, n[1], r)
     else:
       var x: TCompRes = default(TCompRes)
@@ -2617,6 +2620,11 @@ proc genArrayConstr(p: PProc, n: PNode, r: var TCompRes) =
   ## Constructs array or sequence.
   ## Nim array of uint8..uint32, int8..int32 maps to JS typed arrays.
   ## Nim sequence maps to JS array.
+  if isDefaultBroadcastArray(n, p.config):
+    # a single son stands for `lengthOrd` zeroed elements:
+    r.res = createVar(p, n.typ, false)
+    r.kind = resExpr
+    return
   var t = skipTypes(n.typ, abstractInst)
   let e = elemType(t)
   let jsTyp = arrayTypeForElemType(p.config, e)
@@ -3155,7 +3163,9 @@ proc gen(p: PProc, n: PNode, r: var TCompRes) =
   of nkPragma: genPragma(p, n)
   of nkProcDef, nkFuncDef, nkMethodDef, nkConverterDef:
     var s = n[namePos].sym
-    if {sfExportc, sfCompilerProc} * s.flags == {sfExportc}:
+    # like the C backend, skip generic routines (#25229)
+    if n[genericParamsPos].kind == nkEmpty and
+        {sfExportc, sfCompilerProc} * s.flags == {sfExportc}:
       genSym(p, n[namePos], r)
       r.res = ""
   of nkGotoState, nkState:

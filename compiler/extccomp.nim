@@ -14,7 +14,7 @@
 
 import ropes, platform, condsyms, options, msgs, lineinfos, pathutils, modulepaths
 
-import std/[os, osproc, streams, sequtils, times, strtabs, json, jsonutils, sugar, parseutils]
+import std/[os, osproc, streams, sequtils, times, strtabs, json, jsonutils, sugar, parseutils, algorithm]
 
 import std / strutils except addf
 
@@ -409,12 +409,22 @@ proc toObjFile*(conf: ConfigRef; filename: AbsoluteFile): AbsoluteFile =
 proc addFileToCompile*(conf: ConfigRef; cf: Cfile) =
   conf.toCompile.add(cf)
 
-proc addLocalCompileOption*(conf: ConfigRef; option: string; nimfile: AbsoluteFile) =
-  let key = completeCfilePath(conf, mangleModuleName(conf, nimfile).AbsoluteFile).string
+proc addCFileSpecificOption(conf: ConfigRef; option, key: string) =
   var value = conf.cfileSpecificOptions.getOrDefault(key)
   if strutils.find(value, option, 0) < 0:
     addOpt(value, option)
     conf.cfileSpecificOptions[key] = value
+
+proc addLocalCompileOption*(conf: ConfigRef; option: string; nimfile: AbsoluteFile) =
+  let key = completeCfilePath(conf, mangleModuleName(conf, nimfile).AbsoluteFile).string
+  addCFileSpecificOption(conf, option, key)
+
+proc addLocalCompileOptionForCFile*(conf: ConfigRef; option: string;
+                                   cfile: AbsoluteFile) =
+  ## Add an option for an already generated C file. IC's backend gives loaded
+  ## modules synthetic filenames, so the source-file-based key used by
+  ## `addLocalCompileOption` does not identify the C file emitted for them.
+  addCFileSpecificOption(conf, option, cfile.changeFileExt("").string)
 
 proc resetCompilationLists*(conf: ConfigRef) =
   conf.toCompile.setLen 0
@@ -524,6 +534,7 @@ proc vccplatform(conf: ConfigRef): string =
         of cpuI386: " --platform:x86"
         of cpuArm: " --platform:arm"
         of cpuAmd64: " --platform:amd64"
+        of cpuArm64: " --platform:arm64"
         else: ""
     else:
       result = ""
@@ -683,10 +694,14 @@ proc footprint(conf: ConfigRef; cfile: Cfile): SecureHash =
     extccomp.CC[conf.cCompiler].name &
     getCompileCFileCmd(conf, cfile))
 
+proc cfileHashFile*(conf: ConfigRef; cfile: AbsoluteFile): AbsoluteFile =
+  ## Where the footprint of the last compile of `cfile` is kept.
+  toGeneratedFile(conf, conf.mangleModuleName(cfile).AbsoluteFile, "sha1")
+
 proc externalFileChanged(conf: ConfigRef; cfile: Cfile): bool =
   if conf.backend == backendJs: return false # pre-existing behavior, but not sure it's good
 
-  let hashFile = toGeneratedFile(conf, conf.mangleModuleName(cfile.cname).AbsoluteFile, "sha1")
+  let hashFile = cfileHashFile(conf, cfile.cname)
   let currentHash = footprint(conf, cfile)
   var f: File = default(File)
   if open(f, hashFile.string, fmRead):
@@ -996,6 +1011,7 @@ proc callCCompiler*(conf: ConfigRef) =
   var prettyCmds: TStringSeq = default(TStringSeq)
   let prettyCb = proc (idx: int) = writePrettyCmdsStderr(prettyCmds[idx])
 
+  var cmdSizes: seq[BiggestInt] = @[]
   for idx, it in conf.toCompile:
     # call the C compiler for the .c file:
     if CfileFlag.Cached in it.flags: continue
@@ -1003,9 +1019,26 @@ proc callCCompiler*(conf: ConfigRef) =
     if optCompileOnly notin conf.globalOptions:
       cmds.add(compileCmd)
       prettyCmds.add displayProgressCC(conf, $it.cname, compileCmd)
+      cmdSizes.add(try: getFileSize(it.cname.string) except OSError: 0)
     if optGenScript in conf.globalOptions:
       script.add(compileCmd)
       script.add("\n")
+
+  if optCompileOnly notin conf.globalOptions and conf.numberOfProcessors != 1:
+    # Longest job first: the build ends when the slowest C file does, so
+    # starting it last (module order puts `sem.nim`'s near the end) leaves
+    # every other core idle while it finishes. File size is a good enough
+    # proxy for compile time.
+    var order = newSeq[int](cmds.len)
+    for i in 0 ..< order.len: order[i] = i
+    order.sort(proc (a, b: int): int = cmp(cmdSizes[b], cmdSizes[a]))
+    var sortedCmds = newSeq[string](cmds.len)
+    var sortedPretty = newSeq[string](cmds.len)
+    for i, j in order:
+      sortedCmds[i] = cmds[j]
+      sortedPretty[i] = prettyCmds[j]
+    cmds = sortedCmds
+    prettyCmds = sortedPretty
 
   if optCompileOnly notin conf.globalOptions:
     execCmdsInParallel(conf, cmds, prettyCb)
@@ -1081,11 +1114,13 @@ proc jsonBuildInstructionsFile*(conf: ConfigRef): AbsoluteFile =
   # works out of the box with `hashMainCompilationParams`.
   result = getNimcacheDir(conf) / conf.outFile.changeFileExt("json")
 
-const cacheVersion = "D20240927T193831" # update when `BuildCache` spec changes
+proc jsonBuildStateFile(conf: ConfigRef): AbsoluteFile =
+  result = AbsoluteFile(conf.jsonBuildInstructionsFile.string.changeFileExt("state"))
+
+const cacheVersion = "D20260925T120000" # update when `BuildCache` spec changes
 type BuildCache = object
   cacheVersion: string
   outputFile: string
-  outputLastModificationTime: string
   compile: seq[(string, string)]
   link: seq[string]
   linkcmd: string
@@ -1095,9 +1130,49 @@ type BuildCache = object
   projectIsCmd: bool
   cmdInput: string
   currentDir: string
+  depfiles: seq[(string, string)]
+  nimexe: string
+
+type BuildState = object
+  cacheVersion: string
+  outputFile: string
+  outputLastModificationTime: string
+  configFiles: seq[string]
+  stdinInput: bool
+  projectIsCmd: bool
+  cmdInput: string
+  currentDir: string
   cmdline: string
   depfiles: seq[(string, string)]
   nimexe: string
+
+proc tracksBuildState(conf: ConfigRef): bool {.inline.} =
+  result = optRun in conf.globalOptions or isDefined(conf, "nimBetterRun")
+
+proc writeBuildState(conf: ConfigRef; bcache: BuildCache) =
+  ## Build instructions are produced before their commands run (and, under
+  ## --spawncodegen, in a different process). Persist the reusable-build
+  ## record only after the outer invocation has completed the link.
+  if not tracksBuildState(conf) or conf.errorCounter > 0 or
+      not fileExists(bcache.outputFile):
+    return
+  let state = BuildState(
+    cacheVersion: bcache.cacheVersion,
+    outputFile: bcache.outputFile,
+    outputLastModificationTime: $getLastModificationTime(bcache.outputFile),
+    configFiles: bcache.configFiles,
+    stdinInput: bcache.stdinInput,
+    projectIsCmd: bcache.projectIsCmd,
+    cmdInput: bcache.cmdInput,
+    currentDir: bcache.currentDir,
+    cmdline: conf.commandLine,
+    depfiles: bcache.depfiles,
+    nimexe: bcache.nimexe)
+  try:
+    jsonBuildStateFile(conf).writeFile(state.toJson.pretty)
+  except IOError, OSError:
+    # This is only an optimization; a missing/invalid state causes a rebuild.
+    discard
 
 proc writeJsonBuildInstructions*(conf: ConfigRef; deps: StringTableRef) =
   var linkFiles = collect(for it in conf.externalToLink:
@@ -1118,8 +1193,7 @@ proc writeJsonBuildInstructions*(conf: ConfigRef; deps: StringTableRef) =
     cmdInput: conf.cmdInput,
     configFiles: conf.configFiles.mapIt(it.string),
     currentDir: getCurrentDir())
-  if optRun in conf.globalOptions or isDefined(conf, "nimBetterRun"):
-    bcache.cmdline = conf.commandLine
+  if tracksBuildState(conf):
     for it in conf.m.fileInfos:
       let path = it.fullPath.string
       if isAbsolute(path): # TODO: else?
@@ -1129,29 +1203,34 @@ proc writeJsonBuildInstructions*(conf: ConfigRef; deps: StringTableRef) =
           bcache.depfiles.add (path, $secureHashFile(path))
 
     bcache.nimexe = hashNimExe()
-    if fileExists(bcache.outputFile):
-      bcache.outputLastModificationTime = $getLastModificationTime(bcache.outputFile)
   conf.jsonBuildFile = conf.jsonBuildInstructionsFile
   conf.jsonBuildFile.string.writeFile(bcache.toJson.pretty)
+  # The in-process path has already compiled and linked at this point. The
+  # spawned --compileOnly child must leave completion state to its parent.
+  if optCompileOnly notin conf.globalOptions:
+    writeBuildState(conf, bcache)
 
 proc changeDetectedViaJsonBuildInstructions*(conf: ConfigRef; jsonFile: AbsoluteFile): bool =
   result = false
-  if not fileExists(jsonFile) or not fileExists(conf.absOutFile): return true
-  var bcache: BuildCache = default(BuildCache)
-  try: bcache.fromJson(jsonFile.string.parseFile)
-  except IOError, OSError, ValueError:
-    stderr.write "Warning: JSON processing failed for: $#\n" % jsonFile.string
+  let stateFile = jsonBuildStateFile(conf)
+  if not fileExists(jsonFile) or not fileExists(stateFile) or
+      not fileExists(conf.absOutFile):
     return true
-  if bcache.currentDir != getCurrentDir() or # fixes bug #16271
-     bcache.configFiles != conf.configFiles.mapIt(it.string) or
-     bcache.cacheVersion != cacheVersion or bcache.outputFile != conf.absOutFile.string or
-     bcache.cmdline != conf.commandLine or bcache.nimexe != hashNimExe() or
-     bcache.projectIsCmd != conf.projectIsCmd or conf.cmdInput != bcache.cmdInput: return true
-  if bcache.stdinInput or conf.projectIsStdin: return true
+  var state: BuildState = default(BuildState)
+  try: state.fromJson(stateFile.string.parseFile)
+  except IOError, OSError, ValueError, KeyError, JsonKindError:
+    stderr.write "Warning: JSON processing failed for: $#\n" % stateFile.string
+    return true
+  if state.currentDir != getCurrentDir() or # fixes bug #16271
+     state.configFiles != conf.configFiles.mapIt(it.string) or
+     state.cacheVersion != cacheVersion or state.outputFile != conf.absOutFile.string or
+     state.cmdline != conf.commandLine or state.nimexe != hashNimExe() or
+     state.projectIsCmd != conf.projectIsCmd or conf.cmdInput != state.cmdInput: return true
+  if state.stdinInput or conf.projectIsStdin: return true
     # xxx optimize by returning false if stdin input was the same
-  for (file, hash) in bcache.depfiles:
+  for (file, hash) in state.depfiles:
     if $secureHashFile(file) != hash: return true
-  if bcache.outputLastModificationTime != $getLastModificationTime(bcache.outputFile):
+  if state.outputLastModificationTime != $getLastModificationTime(state.outputFile):
     return true
 
 proc runJsonBuildInstructions*(conf: ConfigRef; jsonFile: AbsoluteFile) =
@@ -1168,6 +1247,7 @@ proc runJsonBuildInstructions*(conf: ConfigRef; jsonFile: AbsoluteFile) =
     globalError(conf, gCmdLineInfo,
       "jsonscript command outputFile '$1' must match '$2' which was specified during --compileOnly, see \"outputFile\" entry in '$3' " %
       [outputCurrent, output, jsonFile.string])
+  let errorsBeforeBuild = conf.errorCounter
   var cmds: TStringSeq = default(TStringSeq)
   var prettyCmds: TStringSeq = default(TStringSeq)
   let prettyCb = proc (idx: int) = writePrettyCmdsStderr(prettyCmds[idx])
@@ -1177,6 +1257,8 @@ proc runJsonBuildInstructions*(conf: ConfigRef; jsonFile: AbsoluteFile) =
   execCmdsInParallel(conf, cmds, prettyCb)
   preventLinkCmdMaxCmdLen(conf, bcache.linkcmd)
   for cmd in bcache.extraCmds: execExternalProgram(conf, cmd, hintExecuting)
+  if conf.errorCounter == errorsBeforeBuild:
+    writeBuildState(conf, bcache)
 
 proc spawnCodegenSubprocess*(conf: ConfigRef) =
   ## Spawns a separate nim process with --compileOnly to perform

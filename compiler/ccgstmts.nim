@@ -1535,7 +1535,7 @@ proc genTryGoto(p: BProc; t: PNode; d: var TLoc) =
       p.s(cpsStmts).addAssignment(cDeref("nimErr_"), "oldNimErrFin" & $lab & "_")
     endSimpleBlock(p, finallyScope)
   raiseExit(p)
-  if hasExcept: inc p.withinTryWithExcept
+  if hasExcept: dec p.withinTryWithExcept
 
 proc genTrySetjmp(p: BProc, t: PNode, d: var TLoc) =
   # code to generate:
@@ -1829,6 +1829,7 @@ proc genEmit(p: BProc, t: PNode) =
   if p.prc == nil:
     # top level emit pragma?
     let section = determineSection(t.secondSon)
+    p.module.hasTopLevelEmit = true
     genCLineDir(p.module.s[section], t.info, p.config)
     p.module.s[section].add(s)
   else:

@@ -11,12 +11,12 @@
 
 const
   # examples of possible values for repos: Head, ea82b54
-  NimbleStableCommit = "a399f502dec7ffcd905c1cf54b13274ad990bada"    # 0.24.1
+  NimbleStableCommit = "33a6bc8e50a33222fce075143800fe5a715e8bfe"    # 0.26.0
   AtlasStableCommit = "aa6fb162006f3015aa84c4305e15cb4d230f5ad6"     # 0.14.7
   ChecksumsStableCommit = "5c132cd332cce5d64a0da9ac3e4c9664313dccb4" # 0.2.2
   SatStableCommit = "9d52513b3c68bfb929dbd687d4fb2836cfee6936"
 
-  NimonyStableCommit = "284a62029611d9c95585aed9a8d30faefc5c2db4" # unversioned \
+  NimonyStableCommit = "668edddcaa5651051e7683a38a04f31fba778f35" # unversioned \
     # Note that Nimony uses Nim as a git submodule but we don't want to install
     # Nimony's dependency to Nim as we are Nim. So a `git clone` without --recursive
     # is **required** here.
@@ -344,7 +344,7 @@ proc installDeps(dep: string, commit = "") =
   of "libffi":
     # technically a nimble package, however to play nicely with --noNimblePath,
     # let's just clone it wholesale:
-    if commit.len == 0: commit = "bb2bdaf1a29a4bff6fbd8ae4695877cbb3ec783e"
+    if commit.len == 0: commit = "240db71d0e7f3da74958ac120f47fcc6f1b65b24"
     cloneDependency(distDir, "https://github.com/Araq/libffi", commit)
   else: doAssert false, "unsupported: " & dep
   # xxx: also add linenoise, niminst etc, refs https://github.com/nim-lang/RFCs/issues/206
@@ -658,7 +658,11 @@ proc runIcTestFile(inp: string) =
 const icSuite = ["thallo", "tconverter", "timp", "tmiscs", "tparseutils",
                  "tcompiletimeglobal", "tsighashstable", "tpureenum", "tgenericoffer",
                  "tconverterreexport", "ttypeoffer", "ttransitiveoffer",
-                 "tmodsymref", "tmethupref", "temit", "ttraitparam", "tnestasgn"]
+                 "tmodsymref", "tmethupref", "temit", "tlocalpassc", "ttraitparam",
+                 "tnestasgn", "tconvvar", "tmacrocacheproc", "tlocalpasstarget",
+                 "tgetimplparams", "tseqimportcfloatalias", "tseqimportcuintalias",
+                 "tsinkfieldlastread", "tnrvofieldalias", "temitprocorder",
+                 "tforeignemit"]
 
 proc icTest(args: string) =
   temp("")

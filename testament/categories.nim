@@ -14,7 +14,8 @@
 
 import important_packages
 import std/[strformat, strutils, tables]
-from std/sequtils import filterIt
+from std/sequtils import filterIt, mapIt
+from std/sha1 import secureHash, `$`
 
 const
   specialCategories = [
@@ -385,6 +386,8 @@ proc testStdlib(r: var TResults, pattern, options: string, cat: Category) =
     testSpec r, testObj
 
 # ----------------------------- nimble ----------------------------------------
+import packagebatches
+
 proc listPackagesAll(): seq[NimblePackage] =
   result = @[]
   var nimbleDir = getEnv("NIMBLE_DIR")
@@ -415,8 +418,10 @@ proc listPackages(packageFilter: string): seq[NimblePackage] =
       result = pkgs
     else:
       result = @[]
+      let batches = packageBatchAssignments(pkgs.mapIt(it.name),
+        testamentData0.testamentNumBatch)
       for i in 0..<pkgs.len:
-        if i mod testamentData0.testamentNumBatch == testamentData0.testamentBatch:
+        if batches[i] == testamentData0.testamentBatch:
           result.add pkgs[i]
 
 proc makeSupTest(test, options: string, cat: Category, debugInfo = ""): TTest =
@@ -428,7 +433,7 @@ import std/private/gitutils
 proc testNimblePackages(r: var TResults; cat: Category; packageFilter: string) =
   let nimbleExe = findExe("nimble")
   doAssert nimbleExe != "", "Cannot run nimble tests: Nimble binary not found."
-  doAssert execCmd("$# update" % nimbleExe) == 0, "Cannot run nimble tests: Nimble update failed."
+  doAssert execCmd("$# update  --packageListOnly" % nimbleExe) == 0, "Cannot run nimble tests: Nimble update failed."
   let packageFileTest = makeSupTest("PackageFileParsed", "", cat)
   let packagesDir = "pkgstemp"
   createDir(packagesDir)
@@ -436,6 +441,7 @@ proc testNimblePackages(r: var TResults; cat: Category; packageFilter: string) =
   try:
     let pkgs = listPackages(packageFilter)
     for i, pkg in pkgs:
+      echo "Testing package [$#/$#] $#" % [$i, $pkgs.len, pkg.name]
       inc r.total
       var test = makeSupTest(pkg.name, "", cat, "[$#/$#] " % [$i, $pkgs.len])
       let buildPath = packagesDir / pkg.name
@@ -443,6 +449,7 @@ proc testNimblePackages(r: var TResults; cat: Category; packageFilter: string) =
         var outp: string = ""
         let ok = retryCall(maxRetry = maxRetries, backoffDuration = 10.0):
           var status: int
+          echo "[$#] $#" % [pkg.name, cmd]
           (outp, status) = execCmdEx(cmd, workingDir = workingDir2)
           status == QuitSuccess
         if not ok:
@@ -563,8 +570,10 @@ proc isProvenance(path: string): bool =
   ## Build-provenance sidecars that legitimately differ between a fresh build and
   ## an edit-accumulated one (they record build history, not codegen). Excluded
   ## only from the cross-build clean==incremental comparison — a *no-op* edit must
-  ## still leave even these untouched.
-  path.endsWith(".frontend.build.nif")
+  ## still leave even these untouched. The backend build file lists the
+  ## body dependencies the previous run discovered (`.bodydeps`), which a clean
+  ## build has not seen yet.
+  path.endsWith(".frontend.build.nif") or path.endsWith(".backend.build.nif")
 
 proc stableBinary(path: string): string =
   ## Contents of a linked executable past its header region, for comparing whether
@@ -621,17 +630,30 @@ proc runMetamorphicIcTest(r: var TResults; file: string; cat: Category; options:
   removeDir(buildDir)
   createDir(buildDir)
 
-  # Extra switches for both compilers, settable per step via `#!FLAGS`.
+  when defined(macosx):
+    # Mach-O debug maps contain object-file mtimes outside the header skipped
+    # by stableBinary. Make those timestamps (and their signature hashes)
+    # deterministic for the clean-vs-incremental comparison.
+    let hadZeroArDate = existsEnv("ZERO_AR_DATE")
+    let zeroArDate = getEnv("ZERO_AR_DATE")
+    putEnv("ZERO_AR_DATE", "1")
+    defer:
+      if hadZeroArDate: putEnv("ZERO_AR_DATE", zeroArDate)
+      else: delEnv("ZERO_AR_DATE")
+
+  # Command-line options apply to every step, including the classic oracle.
+  # `#!FLAGS` replaces only the per-step switches.
+  let compilerOptions = parseCmdLine(options)
   var extraFlags: seq[string] = @[]
 
   template compileIc(): untyped =
     execCmdEx2(compilerPrefix, @["ic", "--hint:Conf:off", "--warnings:off",
-      "--nimcache:" & nc, "--out:" & bin] & extraFlags & @["main.nim"],
+      "--nimcache:" & nc, "--out:" & bin] & compilerOptions & extraFlags & @["main.nim"],
       workingDir = buildDir)
 
   template compileRef(): untyped =
     execCmdEx2(compilerPrefix, @["c", "--hint:Conf:off", "--warnings:off",
-      "--nimcache:" & ncRef, "--out:" & binRef] & extraFlags & @["main.nim"],
+      "--nimcache:" & ncRef, "--out:" & binRef] & compilerOptions & extraFlags & @["main.nim"],
       workingDir = buildDir)
 
   # Parse the source into a flat op list: ("file", name, content) | ("step", attrs, "").
@@ -707,7 +729,11 @@ proc runMetamorphicIcTest(r: var TResults; file: string; cat: Category; options:
       for fn in deleted:
         removeFile(buildDir / fn)
       deleted.setLen 0
-      for fn, content in vfs: writeFile(buildDir / fn, content)
+      # Preserve unchanged fixtures' mtimes so no-op steps exercise cache reuse.
+      for fn, content in vfs:
+        let path = buildDir / fn
+        if not fileExists(path) or readFile(path) != content:
+          writeFile(path, content)
       let (_, cout, ccode) = compileIc()
 
       # `fails: <substring>` — the build MUST fail, with that text in its output.
@@ -800,8 +826,25 @@ proc runMetamorphicIcTest(r: var TResults; file: string; cat: Category; options:
           mmRaise(reOutputsDiffer, "clean binary == incremental binary",
             where & ": clean rebuild produced a different binary")
         var diff: seq[string] = @[]
+        # Earlier programs/configurations and unused shared modules remain cached.
+        # Compare all clean shared inputs and the active program's outputs;
+        # no-op checks still cover every file in the accumulated cache.
+        let activePrefix = "configs" / $secureHash(snap["ic_build_args.txt"]) & DirSep
+        let backendPrefix = snap["ic_link_args.txt"].splitLines[0].relativePath(nc) & DirSep
+        let mainPrefix = activePrefix / "sem" / "main" /
+          backendPrefix[0 ..< backendPrefix.len - 1].extractFilename & DirSep
         for p in changedPaths(snap, cleanSnap):
-          if not isProvenance(p): diff.add p
+          let inactiveConfig = p.startsWith("configs" & DirSep) and
+            not p.startsWith(activePrefix)
+          let inactiveBackend = p.startsWith(activePrefix / "backend" & DirSep) and
+            not p.startsWith(backendPrefix)
+          let inactiveMain = p.startsWith(activePrefix / "sem" / "main" & DirSep) and
+            not p.startsWith(mainPrefix)
+          let unusedShared = p notin cleanSnap and
+            (p.startsWith("parsed" & DirSep) or p.parentDir == activePrefix / "sem")
+          if not (inactiveConfig or inactiveBackend or inactiveMain or unusedShared or
+              isProvenance(p)):
+            diff.add p
         if diff.len != 0:
           mmRaise(reOutputsDiffer, "clean cache == incremental cache",
             where & ": clean rebuild differs in " & $diff.len & " cache file(s): " & diff.join(", "))

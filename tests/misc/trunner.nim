@@ -15,6 +15,8 @@ from std/algorithm import sorted
 import stdtest/[specialpaths, unittest_light]
 from std/private/globs import nativeToUnixPath
 from strutils import startsWith, strip, removePrefix
+when defined(musl):
+  from strutils import count, replace
 from std/sugar import dup
 import "$lib/../compiler/nimpaths"
 
@@ -71,9 +73,15 @@ when defined(nimTrunnerFfi):
 hello world stderr
 hi stderr
 """
-      let output = runNimCmdChk("vm/mevalffi.nim", fmt"{opt} --warnings:off --experimental:compiletimeFFI")
+      var output = runNimCmdChk("vm/mevalffi.nim", fmt"{opt} --warnings:off --experimental:compiletimeFFI")
+      when defined(musl):
+        # Check each stream without assuming their buffering order.
+        if prefix.len > 0:
+          doAssert output.count(prefix) == 1, output
+          output = output.replace(prefix, "")
+      let stderrPrefix = when defined(musl): "" else: prefix
       doAssert output == fmt"""
-{prefix}foo
+{stderrPrefix}foo
 foo:100
 foo:101
 foo:102:103
@@ -398,6 +406,23 @@ running: v2
 running: v1
 compiling: v3
 running: v3
+running: v2
+""", ret
+
+  block: # nimBetterRun with spawned codegen
+    let file = "misc/mbetterrun.nim"
+    let nimcache3 = buildDir / ("D20260925T120000_" & mode)
+    removeDir nimcache3
+    let opt = fmt"-r -d:nimBetterRun --nimcache:{nimcache3}"
+    var ret = ""
+    for a in @["v1", "v1", "v2", "v2"]:
+      ret.add runNimCmdChk(file, fmt"{opt} -d:mbetterrunVal:{a}")
+    doAssert ret == """
+compiling: v1
+running: v1
+running: v1
+compiling: v2
+running: v2
 running: v2
 """, ret
 

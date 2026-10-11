@@ -1312,14 +1312,13 @@ proc initStrTable*(): TStrTable =
   result = TStrTable(counter: 0)
 
 proc initIdTable*[T](): TIdTable[T] =
+  # the storage is allocated on the first put; most binding tables (one per
+  # overload candidate) stay empty, bug #26349
   result = TIdTable[T](counter: 0)
-  newSeq(result.data, StartSize)
 
 proc resetIdTable*[T](x: var TIdTable[T]) =
   x.counter = 0
-  # clear and set to old initial size:
   setLen(x.data, 0)
-  setLen(x.data, StartSize)
 
 proc initObjectSet*(): TObjectSet =
   result = TObjectSet(counter: 0)
@@ -1643,7 +1642,9 @@ proc skipGenericOwner*(s: PSym): PSym =
   ## of the generic itself (the module or the enclosing proc).
   result = if s.kind == skModule:
              s
-           elif s.kind in skProcKinds and sfFromGeneric in s.flags and s.owner.kind != skModule:
+           # a hook the backend lifted for an owner-less type has no owner:
+           elif s.kind in skProcKinds and sfFromGeneric in s.flags and
+               s.owner != nil and s.owner.kind != skModule:
              s.owner.owner
            else:
              s.owner
@@ -1904,9 +1905,13 @@ template canRaiseImpl*(fnArg: typed): bool =
     elif fn.kind == nkSym and fn.sym.magic == mEcho:
       markCanRaiseBranch 2
       res = true
-    elif fn.typ != nil and fn.typ.kind == tyProc and fn.typ.n != nil:
+    elif fn.typ != nil and (let t = fn.typ.skipTypes({tyGenericInst, tyAlias, tySink});
+        t.kind == tyProc and t.n != nil):
+      # `skipTypes`: a callee typed by a generic proc-type alias
+      # (`Cb[T] = proc (x: T)`) is a `tyGenericInst` wrapping the `tyProc`,
+      # bug #26342.
       markCanRaiseBranch 3
-      let effects = effectsOf(fn.typ)
+      let effects = effectsOf(t)
       if effects.kind == nkSym:
         # The historical shape: slot 0 used to be an `nkType` before the effects
         # moved in (see `newProcType`). Nothing to read, so nothing licenses a

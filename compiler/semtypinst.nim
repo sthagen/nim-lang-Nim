@@ -24,7 +24,16 @@ proc checkPartialConstructedType(conf: ConfigRef; info: TLineInfo, t: PType) =
     localError(conf, info, "type 'var var' is not allowed")
 
 proc checkConstructedType*(conf: ConfigRef; info: TLineInfo, typ: PType) =
-  var t = typ.skipTypes({tyDistinct})
+  var t = typ
+  var seen: seq[PType] = @[]
+  while t.kind == tyDistinct:
+    # `type x = distinct x` would make `skipTypes` loop forever (#5282)
+    for s in seen:
+      if s == t:
+        localError(conf, info, "illegal recursion in type '" & typeToString(typ) & "'")
+        return
+    seen.add t
+    t = t.skipModifier
   if t.kind in tyTypeClasses: discard
   elif t.kind in {tyVar, tyLent} and t.elementType.kind in {tyVar, tyLent}:
     localError(conf, info, "type 'var var' is not allowed")
@@ -38,7 +47,9 @@ proc searchInstTypes*(g: ModuleGraph; key: PType): PType =
       genericTyp.sym != nil): return
 
   for inst in typeInstCacheItems(g, genericTyp.sym):
-    if inst.id == key.id: return inst
+    if inst.id == key.id:
+      g.recordIcImplDep(inst)
+      return inst
     if inst.kidsLen < key.kidsLen:
       # XXX: This happens for prematurely cached
       # types such as Channel[empty]. Why?
@@ -55,6 +66,7 @@ proc searchInstTypes*(g: ModuleGraph; key: PType): PType =
                             flags = {ExactGenericParams, PickyCAliases}):
           break matchType
 
+      g.recordIcImplDep(inst)
       return inst
 
 proc cacheTypeInst(c: PContext; inst: PType) =
@@ -420,6 +432,10 @@ proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
   var body = t.genericHead
   if body.kind != tyGenericBody:
     internalError(cl.c.config, cl.info, "no generic body")
+  if t.kidsLen > body.kidsLen:
+    # more arguments than generic parameters; only reached after an error,
+    # e.g. a malformed generic type under `nim check` (#10217)
+    return errorType(cl.c)
   var header = t
   # search for some instantiation here:
   if cl.allowMetaTypes:
@@ -431,6 +447,7 @@ proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
     when defined(reportCacheHits):
       echo "Generic instantiation cached ", typeToString(result), " for ", typeToString(t)
     return
+  var substituted = false
   for i in FirstGenericParamAt..<t.kidsLen:
     var x = t[i]
     if x.kind in {tyGenericParam}:
@@ -439,6 +456,7 @@ proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
         if header == t: header = instCopyType(cl, t)
         header[i] = x
         propagateToOwner(header, x)
+        substituted = true
     else:
       # Under IC `t` may be a loaded dep type (Sealed/immutable); mutating it
       # would assert, so propagate into a copy. For non-Sealed types keep
@@ -449,7 +467,7 @@ proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
       if header == t and t.state == Sealed: header = instCopyType(cl, t)
       propagateToOwner(header, x)
 
-  if header != t:
+  if substituted:
     # search again after first pass:
     result = searchInstTypes(cl.c.graph, header)
     if result != nil and sameFlags(result, t):
@@ -457,8 +475,15 @@ proc handleGenericInvocation(cl: var TReplTypeVars, t: PType): PType =
         echo "Generic instantiation cached ", typeToString(result), " for ",
           typeToString(t), " header ", typeToString(header)
       return
-  else:
+  elif header == t:
     header = instCopyType(cl, t)
+  else:
+    # Only the Sealed copy above separates `header` from `t`. For a mutable
+    # `t` the arguments' flags are propagated into `t` and the clearing
+    # `instCopyType` above follows; do the same clearing here. Otherwise a
+    # concrete instance keeps `tfHasMeta` from its arguments, and outer generic
+    # matching then treats an already concrete proc value as a meta type.
+    header.excl tfInstClearedFlags
 
   # The instantiating module owns the instance (and announces it as an offer):
   # the generic body's module (`t.genericHead.owner`) has no business owning a
@@ -666,7 +691,7 @@ proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType, isInstValue = false): 
   case t.kind
   of tyGenericInvocation:
     result = handleGenericInvocation(cl, t)
-    if result.last.kind == tyUserTypeClass:
+    if result.kind != tyError and result.last.kind == tyUserTypeClass:
       result.kind = tyUserTypeClassInst
 
   of tyGenericBody:
@@ -759,6 +784,11 @@ proc replaceTypeVarsTAux(cl: var TReplTypeVars, t: PType, isInstValue = false): 
     for i in FirstGenericParamAt..<result.kidsLen:
       result[i] = replaceTypeVarsT(cl, result[i])
     propagateToOwner(result, result.last)
+
+    let body {.cursor.} = result.last
+    if not cl.allowMetaTypes and body != t.last and
+        body.typeInst == nil and body.state != Sealed:
+      body.typeInst = result
 
   else:
     if containsGenericType(t) or
@@ -875,7 +905,9 @@ when false:
 proc recomputeFieldPositions*(t: PType; obj: PNode; currPosition: var int) =
   if t != nil and t.baseClass != nil:
     let b = skipTypes(t.baseClass, skipPtrs)
-    recomputeFieldPositions(b, b.n, currPosition)
+    # the base is not an object after an instantiation error (`nim check`)
+    if b.kind == tyObject:
+      recomputeFieldPositions(b, b.n, currPosition)
   case obj.kind
   of nkRecList:
     for i in 0..<obj.len: recomputeFieldPositions(nil, obj[i], currPosition)
